@@ -1,0 +1,6 @@
+PyQt6>=6.6
+PyQt6-Multimedia>=6.6
+requests>=2.31
+paramiko>=3.4
+runpod>=1.7
+so-vits-svc-fork>=4.2
