@@ -38,14 +38,20 @@ class TrainingOrchestrator:
         self._pod_port = None
 
     def request_stop(self):
-        """Request graceful stop — kills training process on pod, then downloads model."""
+        """Request graceful stop — force-saves checkpoint, then kills training."""
         self._stop_requested = True
         if self._pod_ip and self._pod_port:
             try:
-                self.on_log("Stopping training gracefully...")
+                self.on_log("Saving checkpoint before stopping...")
                 stop_ssh = SSHClient()
                 stop_ssh.connect(self._pod_ip, self._pod_port, self.ssh_key_path)
-                stop_ssh.exec_command("pkill -f 'svc train' 2>/dev/null; echo 'Training stopped'")
+                # SIGTERM triggers graceful shutdown — Lightning saves checkpoint before exiting
+                stop_ssh.exec_command(
+                    "pkill -SIGTERM -f 'svc train' 2>/dev/null; "
+                    "echo 'Graceful shutdown signal sent — waiting for checkpoint save...'; "
+                    "sleep 8; "
+                    "echo 'Training stopped'"
+                )
                 stop_ssh.close()
             except Exception as e:
                 self.on_log(f"Stop signal error: {e}")
@@ -75,7 +81,7 @@ class TrainingOrchestrator:
             dataset_tar = self.dataset_manager.package(speaker_name)
             self._log(f"Dataset packaged: {os.path.getsize(dataset_tar) / 1024 / 1024:.1f} MB")
 
-            # Step 2: Local preprocessing (if svc is installed locally)
+            # Step 2: Local preprocessing (runs on Mac while pod boots)
             use_local_preprocess = LocalPreprocessor.is_available()
             if use_local_preprocess:
                 self._status("preprocessing")
@@ -258,6 +264,76 @@ class TrainingOrchestrator:
                     ssh.upload_file(config_path, "/workspace/configs/44k/config.json")
                 self._log("Resume checkpoint uploaded — training will continue from last epoch")
 
+                # Patch so-vits-svc-fork to start epoch counter from checkpoint epoch
+                resume_epoch = resume_file.replace("G_", "").replace(".pth", "")
+                if resume_epoch.isdigit():
+                    ssh.exec_command(
+                        "cat > /tmp/patch_epoch.py << 'PATCHEOF'\n"
+                        "import pathlib, re\n"
+                        "for p in pathlib.Path('/').glob('**/so_vits_svc_fork/train.py'):\n"
+                        "    code = p.read_text()\n"
+                        "    if 'Setting current epoch to 0' in code:\n"
+                        f"        code = code.replace('Setting current epoch to 0', 'Setting current epoch to {resume_epoch}')\n"
+                        f"        code = code.replace('trainer.current_epoch = 0', 'trainer.current_epoch = {resume_epoch}')\n"
+                        f"        code = code.replace('self.current_epoch = 0', 'self.current_epoch = {resume_epoch}')\n"
+                        "        p.write_text(code)\n"
+                        f"        print('Epoch counter will start from {resume_epoch}')\n"
+                        "    break\n"
+                        "PATCHEOF\n"
+                        "python3 /tmp/patch_epoch.py",
+                        on_stdout=self._log,
+                    )
+
+            # --- OPTIMIZATION 1: Increase batch size ---
+            self._log("Optimizing training config for max speed...")
+            ssh.exec_command(
+                "cat > /tmp/optimize.py << 'OPTEOF'\n"
+                "import json, glob, subprocess\n"
+                "try:\n"
+                "    out = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits']).decode().strip()\n"
+                "    vram_mb = int(out.split(chr(10))[0])\n"
+                "except:\n"
+                "    vram_mb = 24000\n"
+                "if vram_mb >= 80000:\n"
+                "    target_batch = 256\n"
+                "elif vram_mb >= 45000:\n"
+                "    target_batch = 128\n"
+                "elif vram_mb >= 20000:\n"
+                "    target_batch = 64\n"
+                "else:\n"
+                "    target_batch = 32\n"
+                "configs = glob.glob('/workspace/configs/*/config.json')\n"
+                "for cfg_path in configs:\n"
+                "    with open(cfg_path) as f:\n"
+                "        cfg = json.load(f)\n"
+                "    original_batch = cfg.get('train', {}).get('batch_size', 16)\n"
+                "    if 'train' not in cfg:\n"
+                "        cfg['train'] = {}\n"
+                "    cfg['train']['batch_size'] = target_batch\n"
+                "    original_lr = cfg.get('train', {}).get('learning_rate', 0.0001)\n"
+                "    scale = target_batch / original_batch\n"
+                "    new_lr = original_lr * (scale ** 0.5)\n"
+                "    cfg['train']['learning_rate'] = new_lr\n"
+                "    with open(cfg_path, 'w') as f:\n"
+                "        json.dump(cfg, f, indent=2)\n"
+                "    print(f'VRAM: {vram_mb}MB | Batch: {original_batch} -> {target_batch} | LR: {original_lr} -> {new_lr:.6f}')\n"
+                "OPTEOF\n"
+                "python3 /tmp/optimize.py",
+                on_stdout=self._log,
+            )
+
+            # --- OPTIMIZATION 2: Cache dataset in RAM ---
+            self._log("Caching dataset in RAM...")
+            ssh.exec_command(
+                "if [ -d /workspace/dataset ]; then "
+                "cp -r /workspace/dataset /dev/shm/dataset 2>/dev/null && "
+                "rm -rf /workspace/dataset && "
+                "ln -sf /dev/shm/dataset /workspace/dataset && "
+                "echo 'Dataset cached in RAM'; "
+                "else echo 'No dataset dir to cache'; fi",
+                on_stdout=self._log,
+            )
+
             exit_code = ssh.exec_command(
                 "cd /workspace && pip install 'rich==13.9.4' -q 2>/dev/null && "
                 "svc train --model-path /workspace/logs/44k",
@@ -303,6 +379,50 @@ class TrainingOrchestrator:
             )
             self._log("Model downloaded successfully")
 
+            # Save model metadata for the Voices page
+            import json
+            epoch_num = int(latest_g.replace("G_", "").replace(".pth", "")) if latest_g.replace("G_", "").replace(".pth", "").isdigit() else 0
+            dataset_files = self.dataset_manager.list_files(speaker_name)
+            total_duration = sum(f.get("duration", 0) or 0 for f in dataset_files)
+            total_clips = len(dataset_files)
+
+            # Load existing metadata to accumulate epochs on resume
+            meta_path = model_dir / "metadata.json"
+            previous_epochs = 0
+            if meta_path.exists():
+                try:
+                    with open(meta_path) as f:
+                        old_meta = json.load(f)
+                    previous_epochs = old_meta.get("epochs", 0)
+                except Exception:
+                    pass
+
+            # If resuming, add new epochs to previous total
+            if self.resume_from:
+                total_epochs = previous_epochs + epoch_num
+            else:
+                total_epochs = epoch_num
+
+            # Detect batch size from config on pod
+            batch_size = 16  # default
+            try:
+                config_data = json.loads(open(str(model_dir / "config.json")).read())
+                batch_size = config_data.get("train", {}).get("batch_size", 16)
+            except Exception:
+                pass
+
+            metadata = {
+                "epochs": total_epochs,
+                "batch_size": batch_size,
+                "dataset_duration_s": round(total_duration, 1),
+                "dataset_clips": total_clips,
+                "checkpoint": latest_g,
+                "trained_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            }
+            with open(meta_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+            self._log(f"Model info: {total_epochs}E total, {total_clips} clips, {total_duration:.0f}s of audio")
+
             # Done
             self._status("completed")
             self.on_progress(100)
@@ -327,8 +447,24 @@ class TrainingOrchestrator:
             if preprocessed_tar and os.path.exists(preprocessed_tar):
                 os.unlink(preprocessed_tar)
             if pod_id:
-                self._log("Pod is still running — terminate it manually on runpod.io when ready.")
-                self._log(f"Pod ID: {pod_id}")
+                job = get_job(job_id) if job_id else None
+                job_status = job.get("status", "") if job else ""
+                if job_status == "completed":
+                    # Download succeeded — safe to terminate
+                    self._log("Terminating RunPod instance...")
+                    self.runpod.terminate_pod(pod_id)
+                    self._log("Pod terminated (billing stopped)")
+                else:
+                    # Something failed — stop but don't destroy, preserve data
+                    self._log("Stopping pod (preserving data — download may have failed)...")
+                    try:
+                        import runpod
+                        runpod.api_key = self.runpod.api_key
+                        runpod.stop_pod(pod_id)
+                        self._log(f"Pod stopped — data preserved. Terminate manually on runpod.io when ready.")
+                        self._log(f"Pod ID: {pod_id}")
+                    except Exception:
+                        self._log(f"Could not stop pod. Terminate manually: {pod_id}")
 
     def _wait_for_pod(self, pod_id: str, timeout: int = 300) -> tuple[str, int]:
         """Wait for pod to become RUNNING and return (ip, ssh_port)."""

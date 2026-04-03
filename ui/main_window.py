@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (
 
 from ui.pages.dataset_page import DatasetPage
 from ui.pages.inference_page import InferencePage
+from ui.pages.models_page import ModelsPage
+from ui.pages.realtime_page import RealtimePage
 from ui.pages.settings_page import SettingsPage
 from ui.pages.training_page import TrainingPage
 from services.job_store import load_config, get_active_jobs, update_job
@@ -25,7 +27,7 @@ MODELS_DIR = os.path.join(APP_DIR, "data", "models")
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SVC Voice Converter")
+        self.setWindowTitle("SomerSVC")
         self.setMinimumSize(900, 650)
         self.resize(1050, 720)
 
@@ -64,10 +66,12 @@ class MainWindow(QMainWindow):
         )
 
         pages = [
-            ("Settings", "Configure API keys"),
-            ("Dataset", "Add voice samples"),
+            ("Models", "Your trained models"),
+            ("Create", "Create a new model"),
             ("Training", "Train on RunPod"),
-            ("Inference", "Convert voices"),
+            ("Inference", "Convert audio files"),
+            ("Realtime", "Live mic conversion"),
+            ("Settings", "Configure API keys"),
         ]
 
         for name, tooltip in pages:
@@ -83,6 +87,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.stack, 1)
 
         # Create pages
+        self.models_page = ModelsPage()
         self.settings_page = SettingsPage()
         self.dataset_page = DatasetPage()
         self.training_page = TrainingPage(
@@ -93,18 +98,69 @@ class MainWindow(QMainWindow):
             models_dir=MODELS_DIR,
         )
         self.inference_page = InferencePage()
+        self.realtime_page = RealtimePage()
 
-        self.stack.addWidget(self.settings_page)
+        self.stack.addWidget(self.models_page)
         self.stack.addWidget(self.dataset_page)
         self.stack.addWidget(self.training_page)
         self.stack.addWidget(self.inference_page)
+        self.stack.addWidget(self.realtime_page)
+        self.stack.addWidget(self.settings_page)
 
         # Navigation
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.sidebar.setCurrentRow(0)
 
+        # Training status indicator in sidebar
+        self._training_anim_timer = None
+        self._training_anim_dots = 0
+        self.training_page._worker_started = self._on_training_started
+        self.training_page._worker_stopped = self._on_training_stopped
+
+        # Connect training signals
+        original_start = self.training_page._start_training
+        original_finished = self.training_page._on_finished
+        original_error = self.training_page._on_error
+
+        def wrapped_start():
+            original_start()
+            if self.training_page._worker and self.training_page._worker.isRunning():
+                self._on_training_started()
+
+        def wrapped_finished(job_id):
+            original_finished(job_id)
+            self._on_training_stopped()
+
+        def wrapped_error(error):
+            original_error(error)
+            self._on_training_stopped()
+
+        self.training_page._start_training = wrapped_start
+        self.training_page._on_finished = wrapped_finished
+        self.training_page._on_error = wrapped_error
+
         # Clean up orphaned pods on startup
         self._cleanup_orphaned_pods()
+
+    def _on_training_started(self):
+        from PyQt6.QtCore import QTimer
+        self._training_anim_dots = 0
+        self._training_anim_timer = QTimer()
+        self._training_anim_timer.setInterval(500)
+        self._training_anim_timer.timeout.connect(self._animate_training)
+        self._training_anim_timer.start()
+
+    def _on_training_stopped(self):
+        if self._training_anim_timer:
+            self._training_anim_timer.stop()
+            self._training_anim_timer = None
+        # Reset sidebar text
+        self.sidebar.item(2).setText("Training")
+
+    def _animate_training(self):
+        self._training_anim_dots = (self._training_anim_dots + 1) % 4
+        dots = "." * self._training_anim_dots
+        self.sidebar.item(2).setText(f"Training{dots}")
 
     def _cleanup_orphaned_pods(self):
         """Terminate any RunPod pods from failed/stuck jobs on startup."""

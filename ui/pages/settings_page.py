@@ -84,6 +84,28 @@ class SettingsPage(QWidget):
         hint_ssh.setObjectName("subtitle")
         layout.addWidget(hint_ssh)
 
+        # Spotify API (for artist images)
+        layout.addSpacing(16)
+        lbl_spotify = QLabel("Spotify API (optional — for artist images)")
+        lbl_spotify.setStyleSheet("font-weight: bold;")
+        layout.addWidget(lbl_spotify)
+
+        spotify_row = QHBoxLayout()
+        self.txt_spotify_id = QLineEdit()
+        self.txt_spotify_id.setPlaceholderText("Client ID")
+        self.txt_spotify_id.setEchoMode(QLineEdit.EchoMode.Password)
+        spotify_row.addWidget(self.txt_spotify_id, 1)
+
+        self.txt_spotify_secret = QLineEdit()
+        self.txt_spotify_secret.setPlaceholderText("Client Secret")
+        self.txt_spotify_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        spotify_row.addWidget(self.txt_spotify_secret, 1)
+        layout.addLayout(spotify_row)
+
+        hint_spotify = QLabel("Get credentials at developer.spotify.com — auto-fetches artist photos")
+        hint_spotify.setObjectName("subtitle")
+        layout.addWidget(hint_spotify)
+
         # Save button
         layout.addSpacing(24)
         self.btn_save = QPushButton("Save Settings")
@@ -100,10 +122,15 @@ class SettingsPage(QWidget):
 
     def _load_saved(self):
         config = load_config()
-        if config.get("runpod_api_key"):
-            self.txt_api_key.setText(config["runpod_api_key"])
+        api_key = config.get("runpod_api_key", os.environ.get("SOMERSVC_RUNPOD_KEY", ""))
+        if api_key:
+            self.txt_api_key.setText(api_key)
         if config.get("ssh_key_path"):
             self.txt_ssh_key.setText(config["ssh_key_path"])
+        if config.get("spotify_client_id"):
+            self.txt_spotify_id.setText(config["spotify_client_id"])
+        if config.get("spotify_client_secret"):
+            self.txt_spotify_secret.setText(config["spotify_client_secret"])
 
     def _save(self):
         api_key = self.txt_api_key.text().strip()
@@ -120,7 +147,16 @@ class SettingsPage(QWidget):
             self.lbl_status.setStyleSheet("color: #ef4444;")
             return
 
-        save_config({"runpod_api_key": api_key, "ssh_key_path": ssh_key})
+        config_data = {"runpod_api_key": api_key, "ssh_key_path": ssh_key}
+
+        spotify_id = self.txt_spotify_id.text().strip()
+        spotify_secret = self.txt_spotify_secret.text().strip()
+        if spotify_id:
+            config_data["spotify_client_id"] = spotify_id
+        if spotify_secret:
+            config_data["spotify_client_secret"] = spotify_secret
+
+        save_config(config_data)
         self.lbl_status.setText("Settings saved!")
         self.lbl_status.setStyleSheet("color: #22c55e;")
 
@@ -165,7 +201,7 @@ class SettingsPage(QWidget):
             self.txt_ssh_key.setText(path)
 
     def get_api_key(self) -> str:
-        return self.txt_api_key.text().strip()
+        return self.txt_api_key.text().strip() or os.environ.get("SOMERSVC_RUNPOD_KEY", "")
 
     def get_ssh_key_path(self) -> str:
         return os.path.expanduser(self.txt_ssh_key.text().strip())

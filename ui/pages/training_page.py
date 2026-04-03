@@ -56,11 +56,16 @@ class TrainingPage(QWidget):
         subtitle.setObjectName("subtitle")
         layout.addWidget(subtitle)
 
+        # Selected voice display
+        self.lbl_voice = QLabel("No voice selected")
+        self.lbl_voice.setStyleSheet("font-size: 16px; font-weight: bold; color: #5599ff; padding: 4px 0;")
+        layout.addWidget(self.lbl_voice)
+
         # Options row
         opts_row = QHBoxLayout()
-        opts_row.addWidget(QLabel("F0 Method:"))
+        opts_row.addWidget(QLabel("Voice Type:"))
         self.cmb_f0 = QComboBox()
-        self.cmb_f0.addItems(["dio", "parselmouth", "harvest", "crepe", "crepe-tiny"])
+        self.cmb_f0.addItems(["Singing", "Speech"])
         opts_row.addWidget(self.cmb_f0)
 
         opts_row.addSpacing(20)
@@ -89,7 +94,7 @@ class TrainingPage(QWidget):
         self.btn_start.clicked.connect(self._start_training)
         btn_row.addWidget(self.btn_start)
 
-        self.btn_stop = QPushButton("Cancel")
+        self.btn_stop = QPushButton("Stop")
         self.btn_stop.setObjectName("danger")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._cancel_training)
@@ -144,6 +149,7 @@ class TrainingPage(QWidget):
 
     def _start_training(self):
         speaker = self.get_speaker_name()
+        self.lbl_voice.setText(f"Voice: {speaker}" if speaker else "No voice selected")
         if not speaker:
             QMessageBox.warning(self, "Missing", "Set a speaker name on the Dataset page first.")
             return
@@ -193,7 +199,7 @@ class TrainingPage(QWidget):
             ssh_key_path=ssh_key,
             dataset_manager=dataset_mgr,
             models_dir=self.models_dir,
-            f0_method=self.cmb_f0.currentText(),
+            f0_method="crepe" if self.cmb_f0.currentText() == "Singing" else "dio",
             resume_from=resume_from,
         )
         self._worker.log_line.connect(self._on_log_line)
