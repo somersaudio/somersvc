@@ -24,7 +24,26 @@ from ui.main_window import MainWindow
 from ui.styles import DARK_THEME
 
 
+def auto_update():
+    """Pull latest code from GitHub on launch."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=app_dir,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if "Already up to date" not in result.stdout:
+            print(f"Updated: {result.stdout.strip()}")
+    except Exception:
+        pass  # No git, no internet, or not a git repo — skip silently
+
+
 def main():
+    auto_update()
+
     app = QApplication(sys.argv)
     app.setApplicationName("SomerSVC")
     app.setStyle("Fusion")
