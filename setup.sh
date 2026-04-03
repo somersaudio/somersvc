@@ -13,6 +13,17 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
+# Download API keys if .env doesn't exist
+if [ ! -f ".env" ]; then
+    echo "Downloading API configuration..."
+    curl -sL "https://gist.githubusercontent.com/somersaudio/ad9423ac7f83b3035850afcbd0a2fc9f/raw/.env" -o .env 2>/dev/null
+    if [ -f ".env" ] && [ -s ".env" ]; then
+        echo "API keys configured!"
+    else
+        echo "Could not download API keys — you'll need to enter them manually in Settings"
+    fi
+fi
+
 echo "Setting up virtual environment..."
 python3 -m venv venv
 source venv/bin/activate
