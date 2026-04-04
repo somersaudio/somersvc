@@ -142,6 +142,9 @@ class MainWindow(QMainWindow):
         # Clean up orphaned pods on startup
         self._cleanup_orphaned_pods()
 
+        # Check for models that finished training while app was closed
+        self._check_pending_downloads()
+
     def _on_training_started(self):
         from PyQt6.QtCore import QTimer
         self._training_anim_dots = 0
@@ -161,6 +164,26 @@ class MainWindow(QMainWindow):
         self._training_anim_dots = (self._training_anim_dots + 1) % 4
         dots = "." * self._training_anim_dots
         self.sidebar.item(2).setText(f"Training{dots}")
+
+    def _check_pending_downloads(self):
+        """Check R2 for models that finished training while the app was closed."""
+        try:
+            from services.training_orchestrator import TrainingOrchestrator
+            recovered = TrainingOrchestrator.check_pending_downloads(
+                MODELS_DIR,
+                on_log=lambda msg: print(f"[Recovery] {msg}"),
+            )
+            if recovered:
+                from PyQt6.QtWidgets import QMessageBox
+                names = ", ".join(recovered)
+                QMessageBox.information(
+                    self, "Models Recovered",
+                    f"The following models finished training while the app was closed "
+                    f"and have been downloaded:\n\n{names}",
+                )
+                self.models_page._refresh_models()
+        except Exception as e:
+            print(f"Pending download check error (non-fatal): {e}")
 
     def _cleanup_orphaned_pods(self):
         """Terminate any RunPod pods from failed/stuck jobs on startup."""

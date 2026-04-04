@@ -52,11 +52,8 @@ class SpotifyClient:
             if resp.status_code == 200:
                 artists = resp.json().get("artists", {}).get("items", [])
                 if artists and artists[0].get("images"):
-                    # Return the medium-sized image (usually index 1)
-                    images = artists[0]["images"]
-                    if len(images) > 1:
-                        return images[1]["url"]
-                    return images[0]["url"]
+                    # Return the largest image (index 0 = 640x640)
+                    return artists[0]["images"][0]["url"]
         except Exception:
             pass
         return None

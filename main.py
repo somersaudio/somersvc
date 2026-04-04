@@ -18,6 +18,7 @@ if os.path.exists(env_path):
                 os.environ.setdefault(key.strip(), val.strip())
 
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 
 from ui.main_window import MainWindow
@@ -46,6 +47,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("SomerSVC")
+    app.setFont(QFont("Helvetica", 13))
     app.setStyle("Fusion")
     app.setStyleSheet(DARK_THEME)
 

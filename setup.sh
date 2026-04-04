@@ -24,7 +24,8 @@ if [ ! -f ".env" ]; then
     fi
 fi
 
-echo "Setting up virtual environment..."
+# Main venv
+echo "Setting up main virtual environment..."
 python3 -m venv venv
 source venv/bin/activate
 
@@ -56,6 +57,29 @@ def save_with_torchcodec(uri, src, sample_rate, *args, **kwargs):
 print('torchaudio patched successfully')
 "
 
+deactivate
+
+# RVC venv (needs Python 3.10 for fairseq compatibility)
+echo ""
+echo "Setting up RVC environment..."
+if command -v python3.10 &> /dev/null; then
+    python3.10 -m venv venv_rvc
+    source venv_rvc/bin/activate
+
+    pip install "pip<24.1" -q
+    pip install rvc-python --no-deps -q
+    pip install torch torchaudio soundfile av "faiss-cpu==1.7.3" pyworld torchcrepe \
+        scipy "numpy<=1.23.5" praat-parselmouth "omegaconf==2.0.6" -q
+    pip install "fairseq @ git+https://github.com/facebookresearch/fairseq.git@v0.12.2" --no-deps -q
+    pip install bitarray regex sacrebleu hydra-core==1.0.7 -q
+
+    deactivate
+    echo "RVC environment ready!"
+else
+    echo "Python 3.10 not found — RVC inference will not be available"
+    echo "Install with: brew install python@3.10"
+fi
+
 # Generate SSH key if needed
 echo ""
 if [ -f "$HOME/.ssh/id_rsa" ]; then
@@ -66,6 +90,29 @@ else
     echo ""
     echo "SSH key generated!"
 fi
+
+# Create desktop app launcher
+echo ""
+echo "Creating desktop launcher..."
+osacompile -o "$HOME/Desktop/SomerSVC.app" -e "
+do shell script \"cd \\\"$(pwd)\\\" && source venv/bin/activate && python main.py > /tmp/somersvc.log 2>&1 &\"
+" 2>/dev/null
+
+if [ -f "assets/icon.png" ]; then
+    mkdir -p /tmp/AppIcon.iconset
+    sips -z 16 16 assets/icon.png --out /tmp/AppIcon.iconset/icon_16x16.png 2>/dev/null
+    sips -z 32 32 assets/icon.png --out /tmp/AppIcon.iconset/icon_16x16@2x.png 2>/dev/null
+    sips -z 32 32 assets/icon.png --out /tmp/AppIcon.iconset/icon_32x32.png 2>/dev/null
+    sips -z 64 64 assets/icon.png --out /tmp/AppIcon.iconset/icon_32x32@2x.png 2>/dev/null
+    sips -z 128 128 assets/icon.png --out /tmp/AppIcon.iconset/icon_128x128.png 2>/dev/null
+    sips -z 256 256 assets/icon.png --out /tmp/AppIcon.iconset/icon_128x128@2x.png 2>/dev/null
+    sips -z 256 256 assets/icon.png --out /tmp/AppIcon.iconset/icon_256x256.png 2>/dev/null
+    sips -z 512 512 assets/icon.png --out /tmp/AppIcon.iconset/icon_256x256@2x.png 2>/dev/null
+    sips -z 512 512 assets/icon.png --out /tmp/AppIcon.iconset/icon_512x512.png 2>/dev/null
+    iconutil -c icns /tmp/AppIcon.iconset -o "$HOME/Desktop/SomerSVC.app/Contents/Resources/applet.icns" 2>/dev/null
+    touch "$HOME/Desktop/SomerSVC.app"
+fi
+echo "SomerSVC app created on Desktop!"
 
 echo ""
 echo "================================"
@@ -80,8 +127,5 @@ echo "NEXT STEPS:"
 echo "1. Copy the SSH public key above"
 echo "2. Go to runpod.io > Settings > SSH Keys"
 echo "3. Paste the key and save"
-echo "4. Launch the app with:"
-echo ""
-echo "   source venv/bin/activate"
-echo "   python main.py"
+echo "4. Double-click SomerSVC on your Desktop!"
 echo ""

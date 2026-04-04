@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Callable
 
 from services.dataset_manager import DatasetManager
-from services.job_store import update_job
+from services.job_store import update_job, get_job
 from services.local_preprocessor import LocalPreprocessor
+from services.r2_client import R2Client
 from services.runpod_client import RunPodClient
 from services.ssh_client import SSHClient
 
@@ -348,92 +349,92 @@ class TrainingOrchestrator:
                 self._log("Training complete!")
 
             # ==========================================
-            # PHASE 5: DOWNLOAD MODEL
+            # PHASE 5: UPLOAD TO R2 + DOWNLOAD
             # ==========================================
 
-            self._status("downloading")
+            self._status("uploading_model")
             self.on_progress(85)
-            self._log("Downloading trained model...")
-            update_job(job_id, status="downloading")
 
-            model_dir = self.models_dir / speaker_name
-            model_dir.mkdir(parents=True, exist_ok=True)
-
-            # Find the latest checkpoint
-            files = ssh.list_remote_files("/workspace/logs/44k")
-            g_files = sorted([f for f in files if f.startswith("G_") and f.endswith(".pth")])
-            if not g_files:
-                raise RuntimeError("No model checkpoint found after training")
-
-            latest_g = g_files[-1]
-            self._log(f"Downloading checkpoint: {latest_g}")
-            ssh.download_file(
-                f"/workspace/logs/44k/{latest_g}",
-                str(model_dir / latest_g),
-            )
-
-            # Download config
-            ssh.download_file(
-                "/workspace/configs/44k/config.json",
-                str(model_dir / "config.json"),
-            )
-            self._log("Model downloaded successfully")
-
-            # Save model metadata for the Voices page
+            # Gather metadata info before we lose SSH
             import json
-            epoch_num = int(latest_g.replace("G_", "").replace(".pth", "")) if latest_g.replace("G_", "").replace(".pth", "").isdigit() else 0
             dataset_files = self.dataset_manager.list_files(speaker_name)
             total_duration = sum(f.get("duration", 0) or 0 for f in dataset_files)
             total_clips = len(dataset_files)
 
-            # Load existing metadata to accumulate epochs on resume
+            # Save job metadata so we can recover if app closes
+            model_dir = self.models_dir / speaker_name
             meta_path = model_dir / "metadata.json"
             previous_epochs = 0
+            previous_batch = 16
             if meta_path.exists():
                 try:
                     with open(meta_path) as f:
                         old_meta = json.load(f)
                     previous_epochs = old_meta.get("epochs", 0)
+                    previous_batch = old_meta.get("batch_size", 16)
                 except Exception:
                     pass
 
-            # If resuming, add new epochs to previous total
-            if self.resume_from:
-                total_epochs = previous_epochs + epoch_num
+            r2 = R2Client()
+            r2_prefix = f"models/{speaker_name}/{job_id}"
+
+            if r2.is_configured():
+                # Upload model to R2 from the pod
+                self._log("Uploading model to cloud storage...")
+                update_job(job_id, status="uploading_model",
+                           r2_prefix=r2_prefix,
+                           speaker_name=speaker_name,
+                           previous_epochs=previous_epochs,
+                           previous_batch=previous_batch,
+                           resume=bool(self.resume_from),
+                           dataset_duration=round(total_duration, 1),
+                           dataset_clips=total_clips)
+
+                # Install boto3 and run upload script on pod
+                ssh.exec_command("pip install boto3 -q 2>/dev/null", on_stdout=self._log)
+                upload_script = r2.get_upload_script()
+                ssh.exec_command(f"cat > /tmp/upload_r2.py << 'R2EOF'\n{upload_script}\nR2EOF")
+                exit_code = ssh.exec_command(
+                    f'SVC_JOB_ID="{job_id}" SVC_SPEAKER="{speaker_name}" python3 /tmp/upload_r2.py',
+                    on_stdout=self._log,
+                    on_stderr=self._log,
+                )
+                if exit_code != 0:
+                    raise RuntimeError("Failed to upload model to R2")
+                self._log("Model uploaded to cloud storage!")
+
+                # Now download from R2 to local (faster than from pod, and survives pod death)
+                self._status("downloading")
+                self.on_progress(90)
+                self._log("Downloading model from cloud...")
+                self._download_from_r2(job_id, speaker_name, r2, r2_prefix,
+                                       previous_epochs, total_duration, total_clips)
             else:
-                total_epochs = epoch_num
+                # Fallback: direct download from pod (old behavior)
+                self._log("R2 not configured — downloading directly from pod...")
+                self._status("downloading")
+                self.on_progress(90)
+                update_job(job_id, status="downloading")
 
-            # Detect batch size from config on pod
-            batch_size = 16  # default
-            try:
-                config_data = json.loads(open(str(model_dir / "config.json")).read())
-                batch_size = config_data.get("train", {}).get("batch_size", 16)
-            except Exception:
-                pass
+                model_dir.mkdir(parents=True, exist_ok=True)
+                files = ssh.list_remote_files("/workspace/logs/44k")
+                g_files = sorted([f for f in files if f.startswith("G_") and f.endswith(".pth")])
+                if not g_files:
+                    raise RuntimeError("No model checkpoint found after training")
 
-            metadata = {
-                "epochs": total_epochs,
-                "batch_size": batch_size,
-                "dataset_duration_s": round(total_duration, 1),
-                "dataset_clips": total_clips,
-                "checkpoint": latest_g,
-                "trained_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-            }
-            with open(meta_path, "w") as f:
-                json.dump(metadata, f, indent=2)
-            self._log(f"Model info: {total_epochs}E total, {total_clips} clips, {total_duration:.0f}s of audio")
+                latest_g = g_files[-1]
+                self._log(f"Downloading checkpoint: {latest_g}")
+                ssh.download_file(f"/workspace/logs/44k/{latest_g}", str(model_dir / latest_g))
+                ssh.download_file("/workspace/configs/44k/config.json", str(model_dir / "config.json"))
+                self._save_metadata(model_dir, latest_g, previous_epochs, total_duration, total_clips)
+                self._log("Model downloaded successfully")
 
             # Done
             self._status("completed")
             self.on_progress(100)
-            update_job(
-                job_id,
-                status="completed",
-                model_path=str(model_dir / latest_g),
-                config_path=str(model_dir / "config.json"),
-            )
+            update_job(job_id, status="completed")
             self._log("Training job completed!")
-            return update_job(job_id, status="completed")
+            return get_job(job_id)
 
         except Exception as e:
             self._log(f"ERROR: {e}")
@@ -449,14 +450,15 @@ class TrainingOrchestrator:
             if pod_id:
                 job = get_job(job_id) if job_id else None
                 job_status = job.get("status", "") if job else ""
-                if job_status == "completed":
-                    # Download succeeded — safe to terminate
+                r2_uploaded = job.get("r2_prefix") if job else None
+                if job_status == "completed" or r2_uploaded:
+                    # Model is safe (downloaded or in R2) — terminate pod
                     self._log("Terminating RunPod instance...")
                     self.runpod.terminate_pod(pod_id)
                     self._log("Pod terminated (billing stopped)")
                 else:
-                    # Something failed — stop but don't destroy, preserve data
-                    self._log("Stopping pod (preserving data — download may have failed)...")
+                    # Something failed before R2 upload — stop but preserve data
+                    self._log("Stopping pod (preserving data — upload may have failed)...")
                     try:
                         import runpod
                         runpod.api_key = self.runpod.api_key
@@ -465,6 +467,163 @@ class TrainingOrchestrator:
                         self._log(f"Pod ID: {pod_id}")
                     except Exception:
                         self._log(f"Could not stop pod. Terminate manually: {pod_id}")
+
+    def _save_metadata(self, model_dir: Path, checkpoint: str,
+                       previous_epochs: int, total_duration: float, total_clips: int):
+        """Save model metadata.json."""
+        import json
+        epoch_str = checkpoint.replace("G_", "").replace(".pth", "")
+        epoch_num = int(epoch_str) if epoch_str.isdigit() else 0
+
+        if self.resume_from:
+            total_epochs = previous_epochs + epoch_num
+        else:
+            total_epochs = epoch_num
+
+        batch_size = 16
+        try:
+            config_data = json.loads(open(str(model_dir / "config.json")).read())
+            batch_size = config_data.get("train", {}).get("batch_size", 16)
+        except Exception:
+            pass
+
+        metadata = {
+            "epochs": total_epochs,
+            "batch_size": batch_size,
+            "dataset_duration_s": round(total_duration, 1),
+            "dataset_clips": total_clips,
+            "checkpoint": checkpoint,
+            "trained_at": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat(),
+        }
+        model_dir.mkdir(parents=True, exist_ok=True)
+        with open(model_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+    def _download_from_r2(self, job_id: str, speaker_name: str, r2: R2Client,
+                          r2_prefix: str, previous_epochs: int,
+                          total_duration: float, total_clips: int):
+        """Download a trained model from R2 to local disk."""
+        import json
+
+        model_dir = self.models_dir / speaker_name
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find the checkpoint file in R2
+        files = r2.list_files(r2_prefix + "/")
+        g_files = sorted([f for f in files if "G_" in f and f.endswith(".pth")])
+        if not g_files:
+            raise RuntimeError(f"No checkpoint found in R2 at {r2_prefix}")
+
+        latest_key = g_files[-1]
+        checkpoint_name = latest_key.split("/")[-1]
+
+        self._log(f"Downloading {checkpoint_name} from cloud...")
+        r2.download_file(latest_key, str(model_dir / checkpoint_name))
+
+        config_key = f"{r2_prefix}/config.json"
+        if r2.file_exists(config_key):
+            r2.download_file(config_key, str(model_dir / "config.json"))
+
+        self._save_metadata(model_dir, checkpoint_name,
+                           previous_epochs, total_duration, total_clips)
+        self._log("Model downloaded from cloud!")
+
+        # Clean up R2 files
+        r2.delete_files(files)
+        self._log("Cloud storage cleaned up")
+
+        update_job(job_id, status="completed",
+                   model_path=str(model_dir / checkpoint_name),
+                   config_path=str(model_dir / "config.json"))
+
+    @staticmethod
+    def check_pending_downloads(models_dir: str, on_log: Callable[[str], None] | None = None):
+        """Check for models uploaded to R2 while app was closed. Call on startup."""
+        from services.job_store import list_jobs
+        log = on_log or (lambda _: None)
+
+        r2 = R2Client()
+        if not r2.is_configured():
+            return []
+
+        jobs = list_jobs()
+        recovered = []
+
+        for job in jobs:
+            status = job.get("status", "")
+            r2_prefix = job.get("r2_prefix")
+            speaker = job.get("speaker_name")
+
+            if not r2_prefix or not speaker:
+                continue
+
+            # Check for jobs that were training/uploading when app closed
+            if status in ("training", "uploading_model", "downloading"):
+                # Check if model made it to R2
+                complete_key = f"{r2_prefix}/_complete.json"
+                if r2.file_exists(complete_key):
+                    log(f"Found completed model for '{speaker}' in cloud storage!")
+                    try:
+                        model_dir = Path(models_dir) / speaker
+                        model_dir.mkdir(parents=True, exist_ok=True)
+
+                        files = r2.list_files(r2_prefix + "/")
+                        g_files = sorted([f for f in files if "G_" in f and f.endswith(".pth")])
+                        if not g_files:
+                            continue
+
+                        latest_key = g_files[-1]
+                        checkpoint_name = latest_key.split("/")[-1]
+
+                        log(f"Downloading {checkpoint_name}...")
+                        r2.download_file(latest_key, str(model_dir / checkpoint_name))
+
+                        config_key = f"{r2_prefix}/config.json"
+                        if r2.file_exists(config_key):
+                            r2.download_file(config_key, str(model_dir / "config.json"))
+
+                        # Build metadata
+                        import json
+                        prev_epochs = job.get("previous_epochs", 0)
+                        is_resume = job.get("resume", False)
+                        epoch_str = checkpoint_name.replace("G_", "").replace(".pth", "")
+                        epoch_num = int(epoch_str) if epoch_str.isdigit() else 0
+                        total_epochs = (prev_epochs + epoch_num) if is_resume else epoch_num
+
+                        batch_size = 16
+                        try:
+                            cfg = json.loads(open(str(model_dir / "config.json")).read())
+                            batch_size = cfg.get("train", {}).get("batch_size", 16)
+                        except Exception:
+                            pass
+
+                        metadata = {
+                            "epochs": total_epochs,
+                            "batch_size": batch_size,
+                            "dataset_duration_s": job.get("dataset_duration", 0),
+                            "dataset_clips": job.get("dataset_clips", 0),
+                            "checkpoint": checkpoint_name,
+                            "trained_at": __import__("datetime").datetime.now(
+                                __import__("datetime").timezone.utc
+                            ).isoformat(),
+                        }
+                        with open(model_dir / "metadata.json", "w") as f:
+                            json.dump(metadata, f, indent=2)
+
+                        # Clean up R2
+                        r2.delete_files(files)
+
+                        # Mark job complete
+                        update_job(job["job_id"], status="completed",
+                                   model_path=str(model_dir / checkpoint_name))
+                        log(f"Model '{speaker}' recovered successfully!")
+                        recovered.append(speaker)
+                    except Exception as e:
+                        log(f"Failed to recover '{speaker}': {e}")
+
+        return recovered
 
     def _wait_for_pod(self, pod_id: str, timeout: int = 300) -> tuple[str, int]:
         """Wait for pod to become RUNNING and return (ip, ssh_port)."""

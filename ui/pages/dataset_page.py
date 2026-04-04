@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from services.dataset_manager import DatasetManager
+from services.vocal_separator import VocalSeparator
 from ui.widgets.audio_drop_zone import AudioDropZone
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -75,6 +76,11 @@ class DatasetPage(QWidget):
         self.btn_browse.clicked.connect(self._browse_files)
         btn_row.addWidget(self.btn_browse)
 
+        self.btn_extract = QPushButton("Isolate Vocals")
+        self.btn_extract.setToolTip("Use AI to isolate and clean vocals — works on full songs or raw recordings")
+        self.btn_extract.clicked.connect(self._extract_vocals)
+        btn_row.addWidget(self.btn_extract)
+
         self.btn_remove = QPushButton("Remove Selected")
         self.btn_remove.setObjectName("danger")
         self.btn_remove.clicked.connect(self._remove_selected)
@@ -112,6 +118,74 @@ class DatasetPage(QWidget):
         )
         if files:
             self._add_files(files)
+
+    def _extract_vocals(self):
+        if not self._voice_name:
+            QMessageBox.warning(self, "No Name", "Enter a voice name first.")
+            return
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Songs to Extract Vocals From", "",
+            "Audio Files (*.wav *.flac *.mp3 *.ogg);;All Files (*)",
+        )
+        if not files:
+            return
+
+        self.split_progress.setVisible(True)
+        self.lbl_split_status.setVisible(True)
+        self.split_progress.setValue(0)
+        self.btn_extract.setEnabled(False)
+        self.btn_browse.setEnabled(False)
+
+        from PyQt6.QtWidgets import QApplication
+
+        separator = VocalSeparator()
+        self.dataset_manager.create_speaker(self._voice_name)
+        total = len(files)
+        extracted_paths = []
+
+        for i, song_path in enumerate(files):
+            name = os.path.basename(song_path)
+            self.lbl_split_status.setText(f"Extracting vocals from '{name}'...")
+            self.split_progress.setValue(int((i / total) * 50))
+            QApplication.processEvents()
+
+            try:
+                import tempfile
+                tmp_dir = tempfile.mkdtemp(prefix="svc_extract_")
+                result = separator.separate(
+                    song_path, tmp_dir,
+                    on_log=lambda msg: (
+                        self.lbl_split_status.setText(msg),
+                        QApplication.processEvents(),
+                    ),
+                )
+                extracted_paths.append(result["vocals"])
+            except Exception as e:
+                QMessageBox.warning(self, "Extraction Failed", f"Failed on '{name}':\n{e}")
+
+        # Now add the extracted vocal files as training data
+        if extracted_paths:
+            self.lbl_split_status.setText("Splitting vocals into clips...")
+            self.split_progress.setValue(60)
+            QApplication.processEvents()
+
+            for j, voc_path in enumerate(extracted_paths):
+                self.split_progress.setValue(60 + int((j / len(extracted_paths)) * 35))
+                QApplication.processEvents()
+                self.dataset_manager.add_files(self._voice_name, [voc_path])
+
+            self.split_progress.setValue(100)
+            self.lbl_split_status.setText(f"Done! Extracted vocals from {len(extracted_paths)} song(s)")
+            self._refresh_file_list()
+        else:
+            self.lbl_split_status.setText("No vocals extracted")
+
+        self.btn_extract.setEnabled(True)
+        self.btn_browse.setEnabled(True)
+
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(3000, lambda: self.split_progress.setVisible(False))
+        QTimer.singleShot(3000, lambda: self.lbl_split_status.setVisible(False))
 
     def _add_files(self, paths: list[str]):
         self.dataset_manager.create_speaker(self._voice_name)

@@ -2,16 +2,28 @@
 
 import os
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import (
+    Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, pyqtSignal,
+)
+
 from PyQt6.QtGui import QPixmap, QPainter, QBrush, QPainterPath, QColor, QFont
 from PyQt6.QtWidgets import (
     QFileDialog,
+    QGraphicsBlurEffect,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
+
+
+class _ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+    def mousePressEvent(self, event):
+        self.clicked.emit()
 
 
 class VoiceCard(QWidget):
@@ -26,26 +38,108 @@ class VoiceCard(QWidget):
         self._init_ui()
 
     def _init_ui(self):
-        self.setFixedHeight(100)
+        self.setFixedHeight(80)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_style()
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(14)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(12)
 
-        # Artist image (circular)
-        self.lbl_image = QLabel()
-        self.lbl_image.setFixedSize(76, 76)
+        # Artist image container (image + grade badge overlay)
+        from PyQt6.QtWidgets import QWidget as _QW
+        img_container = _QW()
+        img_container.setFixedSize(80, 80)
+
+        self._is_downloaded = self.metadata.get("source") == "downloaded"
+        self._ring_color = "#c0c0c0" if self._is_downloaded else "#B0903D"
+
+        self.lbl_image = QLabel(img_container)
+        self.lbl_image.setFixedSize(60, 60)
+        self.lbl_image.move(4, 4)
         self.lbl_image.setStyleSheet(
-            "background-color: #333; border-radius: 38px; border: 2px solid #444;"
+            f"background-color: #333; border-radius: 30px; border: 2px solid {self._ring_color};"
         )
         self.lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Grade badge overlaid on bottom-right of image
+        self._grade, self._grade_color, tip = self._compute_grade()
+        badge_style = (
+            f"font-size: 10px; font-weight: bold; "
+            f"border-radius: 12px; border: 2px solid {self._grade_color};"
+        )
+
+        # Grade label (normal state)
+        self.lbl_grade = _ClickableLabel(self._grade, img_container)
+        self.lbl_grade.setFixedSize(24, 24)
+        self.lbl_grade.move(48, 48)
+        self.lbl_grade.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_grade.setToolTip(tip)
+        self.lbl_grade.setStyleSheet(
+            f"background-color: #1e1e1e; color: {self._grade_color}; " + badge_style
+        )
+
+        # Arrow label (upgrade state) — stacked on top, starts invisible
+        upgrade_tip = self._build_upgrade_tip()
+        self._lbl_arrow = _ClickableLabel("⬆", img_container)
+        self._lbl_arrow.setFixedSize(24, 24)
+        self._lbl_arrow.move(48, 48)
+        self._lbl_arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_arrow.setToolTip(upgrade_tip)
+        # Wrap arrow in a container so we can have glow + opacity
+        self._arrow_container = QWidget(img_container)
+        self._arrow_container.setFixedSize(36, 36)
+        self._arrow_container.move(42, 42)
+        self._arrow_container.setStyleSheet("background: transparent;")
+        self._lbl_arrow.setParent(self._arrow_container)
+        self._lbl_arrow.move(6, 6)
+
+        # Glow on the arrow label itself
+        glow = QGraphicsDropShadowEffect(self._lbl_arrow)
+        glow.setColor(QColor(self._grade_color))
+        glow.setBlurRadius(16)
+        glow.setOffset(0, 0)
+        self._lbl_arrow.setGraphicsEffect(glow)
+
+        # Opacity on the containers for crossfade
+        self._grade_opacity = QGraphicsOpacityEffect(self.lbl_grade)
+        self._grade_opacity.setOpacity(1.0)
+        self.lbl_grade.setGraphicsEffect(self._grade_opacity)
+
+        self._arrow_opacity = QGraphicsOpacityEffect(self._arrow_container)
+        self._arrow_opacity.setOpacity(0.0)
+        self._arrow_container.setGraphicsEffect(self._arrow_opacity)
+
+        # Fade animations
+        self._fade_out_grade = QPropertyAnimation(self._grade_opacity, b"opacity")
+        self._fade_out_grade.setDuration(600)
+        self._fade_out_grade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        self._fade_in_arrow = QPropertyAnimation(self._arrow_opacity, b"opacity")
+
+        self._fade_in_arrow.setDuration(600)
+        self._fade_in_arrow.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        # Pulse badge between grade and ⬆ if model needs upgrade
+        self._badge_showing_arrow = False
+        self._pulse_timer = None
+        # Hidden button to preserve the upgrade signal connection
+        self.btn_upgrade = QPushButton()
+        self.btn_upgrade.setVisible(False)
+        if self._needs_upgrade():
+            self._pulse_timer = QTimer(self)
+            self._pulse_timer.timeout.connect(self._toggle_badge)
+            self._pulse_timer.start(2400)
+            self.lbl_grade.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._lbl_arrow.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.lbl_grade.clicked.connect(self.btn_upgrade.click)
+            self._lbl_arrow.clicked.connect(self.btn_upgrade.click)
+            self._arrow_container.raise_()
 
         # Try to load saved image
         self._load_image()
 
-        layout.addWidget(self.lbl_image)
+        layout.addWidget(img_container)
 
         # Name + creator column
         info_col = QVBoxLayout()
@@ -53,71 +147,62 @@ class VoiceCard(QWidget):
 
         self.lbl_name = QLabel(self.voice_name)
         self.lbl_name.setStyleSheet(
-            "font-size: 16px; font-weight: bold; color: #e0e0e0; background: transparent;"
+            "font-size: 14px; font-weight: bold; color: #e0e0e0; background: transparent;"
         )
+        self.lbl_name.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         info_col.addWidget(self.lbl_name)
 
         creator = self.metadata.get("creator", "")
         self.lbl_creator = QLabel(creator if creator else "")
         self.lbl_creator.setStyleSheet(
-            "font-size: 11px; color: #777; background: transparent;"
+            "font-size: 9px; color: #777; background: transparent;"
         )
         info_col.addWidget(self.lbl_creator)
 
-        layout.addLayout(info_col, 1)
+        # Model type in tooltip only
+        model_type = self.metadata.get("model_type", "svc").upper()
+        self.setToolTip(f"{self.voice_name} — {model_type} model")
 
-        # Upgrade button (only visible if model needs more training)
-        self.btn_upgrade = QPushButton("Upgrade")
-        self.btn_upgrade.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #a855f7;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 4px 12px;
-                font-size: 11px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #c084fc; }
-            """
-        )
-        self.btn_upgrade.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_upgrade.setFixedHeight(26)
-        self.btn_upgrade.setVisible(self._needs_upgrade())
-        layout.addWidget(self.btn_upgrade)
+        info_wrapper = QVBoxLayout()
+        info_wrapper.addStretch()
+        info_wrapper.addLayout(info_col)
+        info_wrapper.addStretch()
+        layout.addLayout(info_wrapper, 1)
 
-        # Quality grade badge
-        grade, grade_color, tip = self._compute_grade()
-        grade_col = QVBoxLayout()
-        grade_col.setSpacing(0)
-
-        self.lbl_grade = QLabel(grade)
-        self.lbl_grade.setStyleSheet(
-            f"font-size: 22px; font-weight: bold; color: {grade_color}; background: transparent;"
-        )
-        self.lbl_grade.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_grade.setToolTip(tip)
-        grade_col.addWidget(self.lbl_grade)
-
-        # Small detail underneath
+    def _build_upgrade_tip(self) -> str:
+        """Build a tooltip explaining the upgrade opportunity."""
         epochs = self.metadata.get("epochs", 0)
+        clips = self.metadata.get("dataset_clips", 0)
         batch = self.metadata.get("batch_size", 16)
-        if epochs > 0:
-            if epochs >= 1000:
-                detail = f"{epochs / 1000:.1f}Ke"
-            else:
-                detail = f"{epochs}e"
-        else:
-            detail = ""
-        self.lbl_detail = QLabel(detail)
-        self.lbl_detail.setStyleSheet(
-            "font-size: 9px; color: #666; background: transparent;"
-        )
-        self.lbl_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        grade_col.addWidget(self.lbl_detail)
+        duration = self.metadata.get("dataset_duration_s", 0)
 
-        layout.addLayout(grade_col)
+        lines = ["⬆ Upgrade Available", "", f"Current grade: {self._grade}"]
+
+        if clips > 0 and epochs > 0:
+            maturity = (epochs * batch) / clips
+            progress = min(int(maturity / 2000 * 100), 99)
+            lines.append(f"Training progress: {progress}%")
+
+            if maturity < 300:
+                lines.append("Status: Undertrained — significant improvement possible")
+            elif maturity < 800:
+                lines.append("Status: Partially trained — more training will help")
+            else:
+                lines.append("Status: Well trained — a bit more to reach full quality")
+
+        # What grade they could reach
+        dur_score = 3 if duration >= 600 else 2 if duration >= 300 else 1 if duration >= 120 else 0
+        potential_total = dur_score + 3  # assume full training convergence
+        grade_map = {6: "S", 5: "A+", 4: "A", 3: "B+", 2: "B", 1: "C", 0: "D"}
+        potential = grade_map.get(potential_total, "?")
+
+        if potential != self._grade:
+            lines.append(f"Potential grade: {potential}")
+
+        lines.append("")
+        lines.append("Click to upgrade this model")
+
+        return "\n".join(lines)
 
     def _needs_upgrade(self) -> bool:
         epochs = self.metadata.get("epochs", 0)
@@ -125,8 +210,28 @@ class VoiceCard(QWidget):
         batch = self.metadata.get("batch_size", 16)
         if epochs == 0 or clips == 0:
             return False
+        # Check if training dataset actually exists
+        dataset_dir = os.path.join("data", "datasets", self.voice_name)
+        if not os.path.isdir(dataset_dir) or not os.listdir(dataset_dir):
+            return False
         maturity = (epochs * batch) / clips
         return maturity < 2000
+
+    def _toggle_badge(self):
+        """Crossfade between grade letter and ⬆ arrow."""
+        self._badge_showing_arrow = not self._badge_showing_arrow
+        if self._badge_showing_arrow:
+            self._fade_out_grade.setStartValue(1.0)
+            self._fade_out_grade.setEndValue(0.0)
+            self._fade_in_arrow.setStartValue(0.0)
+            self._fade_in_arrow.setEndValue(1.0)
+        else:
+            self._fade_out_grade.setStartValue(0.0)
+            self._fade_out_grade.setEndValue(1.0)
+            self._fade_in_arrow.setStartValue(1.0)
+            self._fade_in_arrow.setEndValue(0.0)
+        self._fade_out_grade.start()
+        self._fade_in_arrow.start()
 
     def _compute_grade(self) -> tuple[str, str, str]:
         """Compute quality grade based on dataset duration and total data processed.
@@ -135,6 +240,11 @@ class VoiceCard(QWidget):
         duration = self.metadata.get("dataset_duration_s", 0)
         clips = self.metadata.get("dataset_clips", 0)
         batch = self.metadata.get("batch_size", 16)
+
+        # For downloaded models without full training data, use simplified grading
+        if clips == 0 and (self.metadata.get("sample_rate") or self.metadata.get("rvc_version")):
+            from services.model_inspector import compute_downloaded_grade
+            return compute_downloaded_grade(self.metadata)
 
         if epochs == 0 or clips == 0:
             return ("--", "#555", "No training data yet")
@@ -210,15 +320,15 @@ class VoiceCard(QWidget):
         for img_path in img_paths:
             if os.path.exists(img_path):
                 pixmap = QPixmap(img_path)
-                self.lbl_image.setPixmap(self._make_circular(pixmap, 72))
+                self.lbl_image.setPixmap(self._make_circular(pixmap, 56))
                 return
 
         # Default: show initials
         initials = "".join([w[0].upper() for w in self.voice_name.split("_")[:2]])
         self.lbl_image.setText(initials)
         self.lbl_image.setStyleSheet(
-            "background-color: #2563eb; border-radius: 38px; "
-            "color: white; font-size: 22px; font-weight: bold;"
+            f"background-color: #2563eb; border-radius: 30px; border: 2px solid {self._ring_color}; "
+            "color: white; font-size: 20px; font-weight: bold;"
         )
 
     @staticmethod
@@ -245,6 +355,12 @@ class VoiceCard(QWidget):
     def set_selected(self, selected: bool):
         self._selected = selected
         self._update_style()
+        border_color = "#ffffff" if selected else self._ring_color
+        # Replace any previous border color
+        style = self.lbl_image.styleSheet()
+        import re as _re
+        style = _re.sub(r"border: \dpx solid #[0-9a-fA-F]+", f"border: 2px solid {border_color}", style)
+        self.lbl_image.setStyleSheet(style)
 
     def _update_style(self):
         if self._selected:
@@ -261,13 +377,13 @@ class VoiceCard(QWidget):
             self.setStyleSheet(
                 """
                 VoiceCard {
-                    background-color: #1e1e1e;
-                    border: 1px solid #333;
+                    background-color: #141414;
+                    border: 1px solid #2a2a2a;
                     border-radius: 10px;
                 }
                 VoiceCard:hover {
-                    background-color: #252525;
-                    border-color: #444;
+                    background-color: #1a1a1a;
+                    border-color: #383838;
                 }
                 """
             )

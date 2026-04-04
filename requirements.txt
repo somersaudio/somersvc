@@ -4,3 +4,5 @@ requests>=2.31
 paramiko>=3.4
 runpod>=1.7
 so-vits-svc-fork>=4.2
+boto3>=1.34
+demucs>=4.0
