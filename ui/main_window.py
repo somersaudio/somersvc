@@ -8,7 +8,9 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QPushButton,
     QStackedWidget,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -17,24 +19,83 @@ from ui.pages.inference_page import InferencePage
 from ui.pages.models_page import ModelsPage
 from ui.pages.realtime_page import RealtimePage
 from ui.pages.settings_page import SettingsPage
+from ui.pages.simple_page import SimplePage
 from ui.pages.training_page import TrainingPage
 from services.job_store import load_config, get_active_jobs, update_job
 
-APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODELS_DIR = os.path.join(APP_DIR, "data", "models")
+from services.paths import MODELS_DIR
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SomerSVC")
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setMinimumSize(900, 650)
-        self.resize(1050, 720)
+        self.resize(1050, 820)
+        self._drag_pos = None
 
-        # Central widget
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
+        # Window control buttons (macOS traffic light style)
+        btn_style = """
+            QPushButton {{
+                background: {bg};
+                border: none;
+                border-radius: 6px;
+                padding: 0px;
+            }}
+            QPushButton:hover {{ background: {hover}; }}
+        """
+        self._btn_close = QPushButton(self)
+        self._btn_close.setFixedSize(12, 12)
+        self._btn_close.setStyleSheet(btn_style.format(bg="#ff5f57", hover="#ff3b30"))
+        self._btn_close.clicked.connect(self.close)
+        self._btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._btn_minimize = QPushButton(self)
+        self._btn_minimize.setFixedSize(12, 12)
+        self._btn_minimize.setStyleSheet(btn_style.format(bg="#febc2e", hover="#f5a623"))
+        self._btn_minimize.clicked.connect(self.showMinimized)
+        self._btn_minimize.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # Top-level stack: simple mode vs expert mode
+        self._mode_stack = QStackedWidget()
+        self.setCentralWidget(self._mode_stack)
+        self._is_expert = False
+
+        # ===== SIMPLE MODE =====
+        self._simple_container = QWidget()
+        simple_layout = QVBoxLayout(self._simple_container)
+        simple_layout.setContentsMargins(0, 0, 0, 0)
+        simple_layout.setSpacing(0)
+
+        self.simple_page = SimplePage()
+        simple_layout.addWidget(self.simple_page, 1)
+
+        # Gear icon (bottom-right corner)
+        self._gear_btn_simple = QPushButton("⚙")
+        self._gear_btn_simple.setFixedSize(36, 36)
+        self._gear_btn_simple.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._gear_btn_simple.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,5);
+                border: 1px solid rgba(255,255,255,10);
+                border-radius: 18px;
+                color: #666;
+                font-size: 18px;
+            }
+            QPushButton:hover { background: rgba(255,255,255,12); color: #aaa; }
+        """)
+        self._gear_btn_simple.setToolTip("Switch to Expert Mode")
+        self._gear_btn_simple.clicked.connect(self._toggle_mode)
+        # Position it in bottom-right — we'll update in resizeEvent
+        self._gear_btn_simple.setParent(self._simple_container)
+        self._gear_btn_simple.raise_()
+
+        self._mode_stack.addWidget(self._simple_container)
+
+        # ===== EXPERT MODE =====
+        self._expert_container = QWidget()
+        main_layout = QHBoxLayout(self._expert_container)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
@@ -107,9 +168,44 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.realtime_page)
         self.stack.addWidget(self.settings_page)
 
+        self._mode_stack.addWidget(self._expert_container)
+
+        # Gear icon for expert mode (bottom-right)
+        self._gear_btn_expert = QPushButton("⚙")
+        self._gear_btn_expert.setFixedSize(36, 36)
+        self._gear_btn_expert.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._gear_btn_expert.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,5);
+                border: 1px solid rgba(255,255,255,10);
+                border-radius: 18px;
+                color: #666;
+                font-size: 18px;
+            }
+            QPushButton:hover { background: rgba(255,255,255,12); color: #aaa; }
+        """)
+        self._gear_btn_expert.setToolTip("Switch to Simple Mode")
+        self._gear_btn_expert.clicked.connect(self._toggle_mode)
+        self._gear_btn_expert.setParent(self._expert_container)
+        self._gear_btn_expert.raise_()
+
         # Navigation
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.sidebar.setCurrentRow(0)
+
+        # Sync "Match Artist's Range" (simple) ↔ "Smart Transpose" (inference)
+        self.simple_page._btn_range_match.toggled.connect(
+            self.inference_page.chk_smart_transpose.setChecked
+        )
+        self.inference_page.chk_smart_transpose.toggled.connect(
+            self.simple_page._btn_range_match.setChecked
+        )
+
+        # When a model finishes downloading, switch to simple mode and select it
+        self.models_page.model_downloaded.connect(self._on_model_downloaded)
+
+        # Start in simple mode
+        self._mode_stack.setCurrentWidget(self._simple_container)
 
         # Training status indicator in sidebar
         self._training_anim_timer = None
@@ -144,6 +240,11 @@ class MainWindow(QMainWindow):
 
         # Check for models that finished training while app was closed
         self._check_pending_downloads()
+
+        # Position gear buttons after layout
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self._position_gear_buttons)
+        QTimer.singleShot(100, self._position_window_controls)
 
     def _on_training_started(self):
         from PyQt6.QtCore import QTimer
@@ -209,7 +310,7 @@ class MainWindow(QMainWindow):
             for pod in pods:
                 pod_name = pod.get("name", "")
                 pod_id = pod.get("id", "")
-                if pod_name == "svc-gui-training" and pod_id not in active_pod_ids:
+                if pod_name in ("somersvc-training", "svc-gui-training") and pod_id not in active_pod_ids:
                     print(f"Terminating orphaned pod: {pod_id}")
                     runpod.terminate_pod(pod_id)
 
@@ -224,6 +325,67 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Orphan cleanup error (non-fatal): {e}")
 
+    def _on_model_downloaded(self, artist):
+        """Switch to simple mode and select the newly downloaded model."""
+        self._is_expert = False
+        self._mode_stack.setCurrentWidget(self._simple_container)
+        self._position_gear_buttons()
+        self.simple_page.select_model_by_name(artist)
+
+    def _toggle_mode(self):
+        """Switch between simple and expert mode."""
+        self._is_expert = not self._is_expert
+        if self._is_expert:
+            self._mode_stack.setCurrentWidget(self._expert_container)
+            # Refresh models in expert view
+            self.models_page._refresh_models()
+            self.inference_page._refresh_models()
+        else:
+            self._mode_stack.setCurrentWidget(self._simple_container)
+            self.simple_page._refresh_models()
+        self._position_gear_buttons()
+
+    def _position_gear_buttons(self):
+        """Position gear icons in bottom-right corner."""
+        margin = 16
+        for container, btn in [
+            (self._simple_container, self._gear_btn_simple),
+            (self._expert_container, self._gear_btn_expert),
+        ]:
+            w = container.width()
+            h = container.height()
+            if w > 0 and h > 0:
+                btn.move(w - btn.width() - margin, h - btn.height() - margin)
+                btn.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Delay positioning to ensure layout is complete
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, self._position_gear_buttons)
+        self._position_window_controls()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+
+    def _position_window_controls(self):
+        if hasattr(self, '_btn_close'):
+            self._btn_close.move(8, 6)
+            self._btn_minimize.move(26, 6)
+            self._btn_close.raise_()
+            self._btn_minimize.raise_()
+
     def closeEvent(self, event):
+        self.simple_page.save_session()
         self.training_page.cleanup()
         super().closeEvent(event)

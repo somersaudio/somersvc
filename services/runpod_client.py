@@ -43,8 +43,8 @@ class RunPodClient:
             try:
                 log(f"Trying {gpu_type}...")
                 pod = runpod.create_pod(
-                    name="svc-gui-training",
-                    image_name="somersaudio/svc-gui-training:latest",
+                    name="somersvc-training",
+                    image_name="runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04",
                     gpu_type_id=gpu_type,
                     gpu_count=1,
                     volume_in_gb=50,

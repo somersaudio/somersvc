@@ -26,9 +26,7 @@ from ui.widgets.audio_player import AudioPlayer
 from ui.widgets.log_viewer import LogViewer
 from workers.inference_worker import InferenceWorker
 
-APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MODELS_DIR = os.path.join(APP_DIR, "data", "models")
-OUTPUT_DIR = os.path.join(APP_DIR, "data", "output")
+from services.paths import MODELS_DIR, DATASETS_DIR, OUTPUT_DIR
 
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -603,7 +601,7 @@ class InferencePage(QWidget):
     def _detect_model_key(self):
         """Auto-detect model's vocal key from training dataset clips."""
         model_name = self.cmb_model.currentText().split(" [")[0]
-        dataset_dir = os.path.join(APP_DIR, "data", "datasets", model_name)
+        dataset_dir = os.path.join(DATASETS_DIR, model_name)
 
         if not os.path.isdir(dataset_dir):
             QMessageBox.information(
@@ -667,7 +665,7 @@ class InferencePage(QWidget):
 
         # No saved key — try to auto-detect from training data
         model_name = self.cmb_model.currentText().split(" [")[0]
-        dataset_dir = os.path.join(APP_DIR, "data", "datasets", model_name)
+        dataset_dir = os.path.join(DATASETS_DIR, model_name)
 
         if os.path.isdir(dataset_dir):
             clips = [

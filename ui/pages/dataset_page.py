@@ -21,8 +21,7 @@ from services.dataset_manager import DatasetManager
 from services.vocal_separator import VocalSeparator
 from ui.widgets.audio_drop_zone import AudioDropZone
 
-APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DATASETS_DIR = os.path.join(APP_DIR, "data", "datasets")
+from services.paths import DATASETS_DIR
 
 
 class DatasetPage(QWidget):

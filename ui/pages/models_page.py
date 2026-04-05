@@ -29,9 +29,7 @@ from services.job_store import load_config
 from services.spotify_client import SpotifyClient
 from ui.widgets.voice_card import VoiceCard
 
-APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MODELS_DIR = os.path.join(APP_DIR, "data", "models")
-DATASETS_DIR = os.path.join(APP_DIR, "data", "datasets")
+from services.paths import MODELS_DIR, DATASETS_DIR, CACHE_DIR
 
 
 class _SmoothScrollArea(QScrollArea):
@@ -93,6 +91,8 @@ class _ThumbCacheWorker(QThread):
 
 
 class ModelsPage(QWidget):
+    model_downloaded = pyqtSignal(str)  # artist name
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._selected_voice = ""
@@ -197,7 +197,7 @@ class ModelsPage(QWidget):
         self._dropdown.itemClicked.connect(self._on_dropdown_item_clicked)
         self._hf_models = []
         self._hf_loaded = False
-        self._image_cache_dir = os.path.join(APP_DIR, "data", "cache", "artist_thumbs")
+        self._image_cache_dir = os.path.join(CACHE_DIR, "artist_thumbs")
 
         # Model cards scroll area
         self.cards_container = QWidget()
@@ -623,12 +623,23 @@ class ModelsPage(QWidget):
                     self.browse_bar.setPlaceholderText(msg),
                     QApplication.processEvents(),
                 ),
+                display_name=artist,
             )
 
             # Inspect and mark as downloaded
             from services.model_inspector import inspect_model
             meta = inspect_model(dest)
             meta["source"] = "downloaded"
+
+            # Auto-detect vocal key
+            try:
+                from services.songbpm_client import estimate_artist_key
+                note, hz = estimate_artist_key(artist)
+                if note and hz > 0:
+                    meta["vocal_key"] = note
+            except Exception:
+                pass
+
             with open(os.path.join(dest, "metadata.json"), "w") as f:
                 json.dump(meta, f, indent=2)
 
@@ -637,7 +648,7 @@ class ModelsPage(QWidget):
 
             self.browse_bar.setPlaceholderText("🔍  Search artists...")
             self._refresh_models()
-            QMessageBox.information(self, "Downloaded", f"'{artist}' model downloaded!")
+            self.model_downloaded.emit(artist)
         except Exception as e:
             self.browse_bar.setPlaceholderText("🔍  Search artists...")
             QMessageBox.warning(self, "Download Failed", str(e))

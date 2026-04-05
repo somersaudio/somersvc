@@ -6,7 +6,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-APP_DIR = Path.home() / ".svc-gui"
+from services.paths import USER_DIR
+
+APP_DIR = USER_DIR
 JOBS_FILE = APP_DIR / "jobs.json"
 CONFIG_FILE = APP_DIR / "config.json"
 

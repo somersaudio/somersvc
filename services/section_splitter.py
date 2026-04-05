@@ -9,6 +9,7 @@ def find_section_splits(
     min_silence_sec: float = 0.08,
     silence_thresh_db: float = -25,
     min_section_sec: float = 3,
+    max_sections: int = 20,
 ) -> list[tuple[float, float]]:
     """Find natural section boundaries in audio by detecting silence gaps.
 
@@ -82,8 +83,8 @@ def find_section_splits(
 
         split_times.append(split_sec)
 
-        # Limit to ~20 sections max
-        if len(split_times) >= 21:
+        # Limit to max_sections
+        if len(split_times) >= max_sections + 1:
             break
 
     split_times.append(total_sec)
@@ -123,26 +124,42 @@ def split_audio_file(
     return paths
 
 
-def analyze_section_pitches(section_paths: list[str]) -> list[dict]:
-    """Analyze median pitch of each section. Returns list of dicts with pitch info."""
+def analyze_section_pitches(section_paths: list[str], silence_thresh_db: float = -35) -> list[dict]:
+    """Analyze median pitch of each section. Returns list of dicts with pitch info.
+
+    Sections below silence_thresh_db are marked as silent and skipped for pitch analysis.
+    """
     import librosa
 
     results = []
     for path in section_paths:
         try:
             y, sr = librosa.load(path, sr=22050, duration=120)
+            # Check if section is effectively silence
+            rms = np.sqrt(np.mean(y ** 2))
+            rms_db = 20 * np.log10(rms + 1e-10)
+            if rms_db < silence_thresh_db:
+                results.append({"path": path, "median_hz": 0, "silent": True})
+                continue
+
             f0, voiced, _ = librosa.pyin(
                 y, fmin=librosa.note_to_hz("C2"),
                 fmax=librosa.note_to_hz("C6"), sr=sr,
             )
-            voiced_f0 = f0[voiced & ~np.isnan(f0)]
+            # voiced may be float probabilities or bool mask depending on librosa version
+            voiced_mask = voiced > 0.5 if voiced.dtype != bool else voiced
+            voiced_f0 = f0[voiced_mask & ~np.isnan(f0)]
+            if len(voiced_f0) == 0:
+                # Fallback: use any non-NaN f0 values regardless of voicing
+                voiced_f0 = f0[~np.isnan(f0)]
+                voiced_f0 = voiced_f0[voiced_f0 > 0]
             if len(voiced_f0) > 0:
                 median = float(np.median(voiced_f0))
-                results.append({"path": path, "median_hz": median})
+                results.append({"path": path, "median_hz": median, "silent": False})
             else:
-                results.append({"path": path, "median_hz": 0})
+                results.append({"path": path, "median_hz": 0, "silent": False})
         except Exception:
-            results.append({"path": path, "median_hz": 0})
+            results.append({"path": path, "median_hz": 0, "silent": False})
 
     return results
 
@@ -150,6 +167,7 @@ def analyze_section_pitches(section_paths: list[str]) -> list[dict]:
 def calculate_section_transposes(
     sections: list[dict],
     model_center_hz: float,
+    source_median_hz: float = 0,
 ) -> list[dict]:
     """Calculate the best transpose for each section.
 
@@ -168,15 +186,17 @@ def calculate_section_transposes(
             s["base_transpose"] = 0
         return sections
 
-    # Find overall median pitch across all sections
-    voiced = [s["median_hz"] for s in sections if s["median_hz"] > 0]
-    if not voiced:
-        for s in sections:
-            s["transpose"] = 0
-            s["base_transpose"] = 0
-        return sections
-
-    overall_median = float(np.median(voiced))
+    # Use provided source median, or compute from section medians
+    if source_median_hz > 0:
+        overall_median = source_median_hz
+    else:
+        voiced = [s["median_hz"] for s in sections if s["median_hz"] > 0]
+        if not voiced:
+            for s in sections:
+                s["transpose"] = 0
+                s["base_transpose"] = 0
+            return sections
+        overall_median = float(np.median(voiced))
 
     # Base transpose: shift overall median to model center (any semitone)
     base_transpose = round(12 * math.log2(model_center_hz / overall_median))
@@ -187,18 +207,19 @@ def calculate_section_transposes(
             section["base_transpose"] = base_transpose
             continue
 
-        # After applying base transpose, where does this section land?
-        shifted_hz = section["median_hz"] * (2 ** (base_transpose / 12))
+        # Only allow octave shifts from base transpose to stay in key
+        candidates = [base_transpose + offset for offset in [0, -12, 12, -24, 24]]
 
-        # Now find if ±12 on top of base gets even closer to model center
         best_total = base_transpose
-        best_distance = abs(12 * math.log2(shifted_hz / model_center_hz))
+        best_distance = float("inf")
 
-        for octave_shift in [12, -12]:
-            total = base_transpose + octave_shift
+        for total in candidates:
             test_hz = section["median_hz"] * (2 ** (total / 12))
+            if test_hz <= 0:
+                continue
             distance = abs(12 * math.log2(test_hz / model_center_hz))
-            if distance < best_distance:
+            # Pick closest to model center; on ties, prefer smaller absolute transpose
+            if distance < best_distance or (distance == best_distance and abs(total) < abs(best_total)):
                 best_distance = distance
                 best_total = total
 
@@ -224,6 +245,11 @@ def rejoin_sections(
 
     if not segments:
         return
+
+    # Normalize all segments to mono to avoid shape mismatches
+    for i, seg in enumerate(segments):
+        if seg.ndim == 2:
+            segments[i] = seg.mean(axis=1)
 
     crossfade_samples = int(crossfade_sec * sr)
     result = segments[0]

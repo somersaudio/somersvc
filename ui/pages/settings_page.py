@@ -106,6 +106,23 @@ class SettingsPage(QWidget):
         hint_spotify.setObjectName("subtitle")
         layout.addWidget(hint_spotify)
 
+        # GetSongBPM API Key
+        layout.addSpacing(16)
+        lbl_bpm = QLabel("GetSongBPM API Key (optional — for artist vocal key detection)")
+        lbl_bpm.setStyleSheet("font-weight: bold;")
+        layout.addWidget(lbl_bpm)
+
+        bpm_row = QHBoxLayout()
+        self.txt_songbpm_key = QLineEdit()
+        self.txt_songbpm_key.setPlaceholderText("Enter your GetSongBPM API key...")
+        self.txt_songbpm_key.setEchoMode(QLineEdit.EchoMode.Password)
+        bpm_row.addWidget(self.txt_songbpm_key, 1)
+        layout.addLayout(bpm_row)
+
+        hint_bpm = QLabel("Get your free API key at getsongbpm.com — detects song keys for smart transpose")
+        hint_bpm.setObjectName("subtitle")
+        layout.addWidget(hint_bpm)
+
         # Save button
         layout.addSpacing(24)
         self.btn_save = QPushButton("Save Settings")
@@ -120,17 +137,33 @@ class SettingsPage(QWidget):
 
         layout.addStretch()
 
+        # GetSongBPM attribution (bottom-right)
+        attribution = QLabel('<a href="https://getsongbpm.com" style="color: #555; text-decoration: none;">Song key data powered by GetSongBPM.com</a>')
+        attribution.setOpenExternalLinks(True)
+        attribution.setAlignment(Qt.AlignmentFlag.AlignRight)
+        attribution.setCursor(Qt.CursorShape.PointingHandCursor)
+        attribution.setStyleSheet("font-size: 11px; padding-right: 12px; padding-bottom: 8px;")
+        layout.addWidget(attribution)
+
     def _load_saved(self):
         config = load_config()
         api_key = config.get("runpod_api_key", os.environ.get("SOMERSVC_RUNPOD_KEY", ""))
         if api_key:
             self.txt_api_key.setText(api_key)
-        if config.get("ssh_key_path"):
-            self.txt_ssh_key.setText(config["ssh_key_path"])
+        ssh_path = config.get("ssh_key_path", "")
+        if not ssh_path:
+            # Auto-detect SSH key
+            default = os.path.expanduser("~/.ssh/id_rsa")
+            if os.path.exists(default):
+                ssh_path = default
+        if ssh_path:
+            self.txt_ssh_key.setText(ssh_path)
         if config.get("spotify_client_id"):
             self.txt_spotify_id.setText(config["spotify_client_id"])
         if config.get("spotify_client_secret"):
             self.txt_spotify_secret.setText(config["spotify_client_secret"])
+        if config.get("songbpm_api_key"):
+            self.txt_songbpm_key.setText(config["songbpm_api_key"])
 
     def _save(self):
         api_key = self.txt_api_key.text().strip()
@@ -155,6 +188,10 @@ class SettingsPage(QWidget):
             config_data["spotify_client_id"] = spotify_id
         if spotify_secret:
             config_data["spotify_client_secret"] = spotify_secret
+
+        songbpm_key = self.txt_songbpm_key.text().strip()
+        if songbpm_key:
+            config_data["songbpm_api_key"] = songbpm_key
 
         save_config(config_data)
         self.lbl_status.setText("Settings saved!")

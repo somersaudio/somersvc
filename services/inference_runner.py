@@ -2,8 +2,12 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
+
+# Resolve svc binary from the same venv as this process
+_SVC_BIN = os.path.join(os.path.dirname(sys.executable), "svc")
 
 SUPPRESS = [
     "UserWarning", "FutureWarning", "UNEXPECTED", "HTTP Request",
@@ -43,7 +47,7 @@ class InferenceRunner:
         output_path = os.path.join(output_dir, f"{source_name}.out.wav")
 
         cmd = [
-            "svc", "infer", source_wav,
+            _SVC_BIN, "infer", source_wav,
             "-m", model_path,
             "-o", output_path,
             "-s", "0",

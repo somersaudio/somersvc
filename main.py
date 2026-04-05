@@ -17,8 +17,11 @@ if os.path.exists(env_path):
                 key, val = line.split("=", 1)
                 os.environ.setdefault(key.strip(), val.strip())
 
+from services.paths import ensure_dirs
+ensure_dirs()
+
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtCore import Qt
 
 from ui.main_window import MainWindow
@@ -47,7 +50,16 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("SomerSVC")
-    app.setFont(QFont("Helvetica", 13))
+
+    # Load bundled Manrope font
+    fonts_dir = os.path.join(app_dir, "assets", "fonts")
+    loaded = False
+    if os.path.isdir(fonts_dir):
+        for f in os.listdir(fonts_dir):
+            if f.startswith("Manrope") and f.endswith(".ttf"):
+                QFontDatabase.addApplicationFont(os.path.join(fonts_dir, f))
+                loaded = True
+    app.setFont(QFont("Manrope" if loaded else "Helvetica", 13))
     app.setStyle("Fusion")
     app.setStyleSheet(DARK_THEME)
 

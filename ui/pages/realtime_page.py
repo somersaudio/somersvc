@@ -20,8 +20,7 @@ from PyQt6.QtWidgets import (
 from ui.widgets.knob import Knob
 from ui.widgets.log_viewer import LogViewer
 
-APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MODELS_DIR = os.path.join(APP_DIR, "data", "models")
+from services.paths import MODELS_DIR
 
 
 class RealtimePage(QWidget):
@@ -291,8 +290,10 @@ class RealtimePage(QWidget):
         model_path = os.path.join(model_dir, model_files[-1])
         config_path = os.path.join(model_dir, "config.json")
 
+        import sys
+        svc_bin = os.path.join(os.path.dirname(sys.executable), "svc")
         cmd = [
-            "svc", "vc",
+            svc_bin, "vc",
             "-m", model_path,
             "-c", config_path,
             "-s", speaker,

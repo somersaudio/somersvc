@@ -11,7 +11,8 @@ import requests
 
 HF_REPO = "QuickWick/Music-AI-Voices"
 HF_API_URL = f"https://huggingface.co/api/models/{HF_REPO}/tree/main"
-CACHE_DIR = Path.home() / ".svc-gui"
+from services.paths import USER_DIR
+CACHE_DIR = USER_DIR
 CACHE_FILE = CACHE_DIR / "hf_models_cache.json"
 CACHE_MAX_AGE = 86400  # 24 hours
 
@@ -112,6 +113,7 @@ def download_model(
     folder: str,
     dest_dir: str,
     on_log: Callable[[str], None] | None = None,
+    display_name: str = "",
 ) -> str:
     """Download an RVC model from HuggingFace to dest_dir. Returns model dir path."""
     log = on_log or (lambda _: None)
@@ -135,7 +137,8 @@ def download_model(
         local_path = os.path.join(dest_dir, name)
 
         size_mb = file_info.get("size", 0) / 1024 / 1024
-        log(f"Downloading {name} ({size_mb:.0f} MB)...")
+        display = display_name or name
+        log(f"Downloading {display}...")
         r = requests.get(dl_url, stream=True, timeout=300)
         r.raise_for_status()
 
@@ -147,9 +150,9 @@ def download_model(
                 downloaded += len(chunk)
                 if total:
                     pct = int(downloaded / total * 100)
-                    log(f"Downloading {name}... {pct}%")
+                    log(f"Downloading {display}... {pct}%")
 
-        log(f"Downloaded {name}")
+        log(f"Downloaded {display}")
 
         # Extract zip files and pull out .pth / .index
         if name.lower().endswith(".zip"):

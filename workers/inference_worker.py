@@ -17,6 +17,8 @@ class InferenceWorker(QThread):
     log_line = pyqtSignal(str)
     finished_ok = pyqtSignal(str)  # output file path
     error = pyqtSignal(str)
+    section_results = pyqtSignal(list)  # list of dicts with per-section info
+    cache_ready = pyqtSignal(dict)  # section cache for incremental re-renders
 
     def __init__(
         self,
@@ -37,6 +39,10 @@ class InferenceWorker(QThread):
         model_dir: str = "",
         smart_transpose: bool = False,
         model_center_hz: float = 0,
+        max_sections: int = 20,
+        custom_sections: list = None,
+        custom_transposes: list = None,
+        section_cache: dict = None,
     ):
         super().__init__()
         self.source_wav = source_wav
@@ -56,6 +62,22 @@ class InferenceWorker(QThread):
         self.model_dir = model_dir
         self.smart_transpose = smart_transpose
         self.model_center_hz = model_center_hz
+        self.custom_sections = custom_sections
+        self.custom_transposes = custom_transposes
+        self.max_sections = max_sections
+        self.section_cache = section_cache or {}
+
+    def _next_output_path(self, source_name):
+        """Find next available numbered output path: filename_artist_1.wav"""
+        artist = os.path.basename(self.model_dir) if self.model_dir else "converted"
+        base_name = f"{source_name}_{artist}"
+        # Start at 1
+        n = 1
+        while True:
+            path = os.path.join(self.output_dir, f"{base_name}_{n}.wav")
+            if not os.path.exists(path):
+                return path
+            n += 1
 
     def run(self):
         try:
@@ -117,7 +139,7 @@ class InferenceWorker(QThread):
         import tempfile
 
         source_name = Path(self.source_wav).stem
-        output_path = os.path.join(self.output_dir, f"{source_name}.out.wav")
+        output_path = self._next_output_path(source_name)
         tmp_dir = tempfile.mkdtemp(prefix="svc_sep_")
 
         try:
@@ -181,7 +203,7 @@ class InferenceWorker(QThread):
         )
 
         source_name = Path(self.source_wav).stem
-        output_path = os.path.join(self.output_dir, f"{source_name}.out.wav")
+        output_path = self._next_output_path(source_name)
         tmp_dir = tempfile.mkdtemp(prefix="svc_smart_")
 
         try:
@@ -196,10 +218,14 @@ class InferenceWorker(QThread):
                 process_path = stems["vocals"]
                 instrumentals_path = stems["instrumentals"]
 
-            # Step 2: Find section splits
-            log("Detecting sections...")
-            sections = find_section_splits(process_path)
-            log(f"Found {len(sections)} sections")
+            # Step 2: Find section splits (use custom if user adjusted them)
+            if self.custom_sections and len(self.custom_sections) > 1:
+                sections = self.custom_sections
+                log(f"Using {len(sections)} user-defined sections")
+            else:
+                log("Detecting sections...")
+                sections = find_section_splits(process_path, max_sections=self.max_sections)
+                log(f"Found {len(sections)} sections")
 
             if len(sections) <= 1:
                 # No splits found — fall back to normal inference
@@ -218,35 +244,76 @@ class InferenceWorker(QThread):
             section_dir = os.path.join(tmp_dir, "sections")
             section_paths = split_audio_file(process_path, sections, section_dir)
 
-            # Step 4: Analyze pitch of each section
-            log("Analyzing section pitches...")
-            section_info = analyze_section_pitches(section_paths)
+            # Step 4: Analyze pitch & calculate transpose
+            if self.custom_transposes and len(self.custom_transposes) == len(section_paths):
+                # User set transposes manually — skip re-analysis
+                log("Using user-defined transposes")
+                section_info = [{"path": p, "median_hz": 0, "transpose": t, "base_transpose": self.custom_transposes[0]}
+                                for p, t in zip(section_paths, self.custom_transposes)]
+            else:
+                log("Analyzing section pitches...")
+                section_info = analyze_section_pitches(section_paths)
+                section_info = calculate_section_transposes(section_info, self.model_center_hz)
 
-            # Step 5: Calculate per-section transpose
-            section_info = calculate_section_transposes(section_info, self.model_center_hz)
-
-            base = section_info[0].get("base_transpose", 0)
+            base = section_info[0].get("base_transpose", section_info[0].get("transpose", 0))
             from ui.pages.inference_page import _hz_to_note
             model_note = _hz_to_note(self.model_center_hz)
             log(f"Base transpose: {base:+d} semitones (to match {model_note})")
 
+            import math
+            results = []
             for i, info in enumerate(section_info):
                 dur = sections[i][1] - sections[i][0]
-                note = _hz_to_note(info["median_hz"]) if info["median_hz"] > 0 else "?"
+                from_note = _hz_to_note(info["median_hz"]) if info["median_hz"] > 0 else "?"
+                to_hz = info["median_hz"] * (2 ** (info["transpose"] / 12)) if info["median_hz"] > 0 else 0
+                to_note = _hz_to_note(to_hz) if to_hz > 0 else "?"
+                if to_hz > 0 and self.model_center_hz > 0:
+                    distance = abs(12 * math.log2(to_hz / self.model_center_hz))
+                else:
+                    distance = 99  # unknown pitch — preserve pre-conversion coloring
                 extra = info["transpose"] - base
                 extra_str = f" + octave {extra:+d}" if extra != 0 else ""
-                log(f"  Section {i + 1}: {dur:.1f}s, center {note}, transpose {info['transpose']:+d}{extra_str}")
+                log(f"  Section {i + 1}: {dur:.1f}s, {from_note} → {to_note}, transpose {info['transpose']:+d}{extra_str}")
+                results.append({
+                    "transpose": info["transpose"],
+                    "from_note": from_note,
+                    "to_note": to_note,
+                    "distance": round(distance, 1),
+                    "silent": info.get("silent", False),
+                })
+            self.section_results.emit(results)
 
-            # Step 6: Run inference on each section with its transpose
+            # Step 6: Run inference on each section (use cache for unchanged sections)
             converted_paths = []
             conv_dir = os.path.join(tmp_dir, "converted")
             os.makedirs(conv_dir, exist_ok=True)
+            new_cache = {}
+            cached_count = 0
 
             for i, info in enumerate(section_info):
-                log(f"Converting section {i + 1}/{len(section_info)} (transpose {info['transpose']:+d})...")
-                # Temporarily override transpose
+                t = info["transpose"]
+                # Cache key includes section boundaries so cache survives index shifts
+                sec_start, sec_end = sections[i] if i < len(sections) else (0, 0)
+                cache_key = f"{sec_start:.3f}_{sec_end:.3f}_{t:+d}"
+
+                if info.get("silent"):
+                    log(f"Skipping section {i + 1}/{len(section_info)} (silence)")
+                    converted_paths.append(info["path"])
+                    new_cache[cache_key] = {"transpose": t, "path": info["path"], "silent": True}
+                    continue
+
+                # Check cache: same boundaries + transpose + cached file still exists
+                cached = self.section_cache.get(cache_key)
+                if cached and os.path.exists(cached.get("path", "")):
+                    log(f"Using cached section {i + 1}/{len(section_info)} (transpose {t:+d})")
+                    converted_paths.append(cached["path"])
+                    new_cache[cache_key] = cached
+                    cached_count += 1
+                    continue
+
+                log(f"Converting section {i + 1}/{len(section_info)} (transpose {t:+d})...")
                 original_transpose = self.transpose
-                self.transpose = info["transpose"]
+                self.transpose = t
 
                 if self.model_type == "rvc":
                     out = self._run_rvc(info["path"], log, output_dir=conv_dir)
@@ -254,7 +321,21 @@ class InferenceWorker(QThread):
                     out = self._run_svc(info["path"], log, output_dir=conv_dir)
 
                 self.transpose = original_transpose
+
+                # Copy converted file to a persistent cache location
+                cache_dir = os.path.join(self.output_dir, ".section_cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                cache_path = os.path.join(cache_dir, f"section_{i:02d}_t{t:+d}.wav")
+                shutil.copy2(out, cache_path)
+
                 converted_paths.append(out)
+                new_cache[cache_key] = {"transpose": t, "path": cache_path}
+
+            if cached_count > 0:
+                log(f"Used {cached_count} cached sections, converted {len(section_info) - cached_count - sum(1 for s in section_info if s.get('silent'))} new")
+
+            # Emit cache for next run
+            self.cache_ready.emit(new_cache)
 
             # Step 7: Rejoin sections
             log("Rejoining sections...")

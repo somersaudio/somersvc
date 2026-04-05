@@ -1,6 +1,7 @@
 """Voice card widget — artist-style card for the Voices page."""
 
 import os
+from services.paths import MODELS_DIR, DATASETS_DIR
 
 from PyQt6.QtCore import (
     Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, pyqtSignal,
@@ -211,7 +212,7 @@ class VoiceCard(QWidget):
         if epochs == 0 or clips == 0:
             return False
         # Check if training dataset actually exists
-        dataset_dir = os.path.join("data", "datasets", self.voice_name)
+        dataset_dir = os.path.join(DATASETS_DIR, self.voice_name)
         if not os.path.isdir(dataset_dir) or not os.listdir(dataset_dir):
             return False
         maturity = (epochs * batch) / clips
@@ -314,8 +315,8 @@ class VoiceCard(QWidget):
     def _load_image(self):
         """Load voice image from data/models/{voice}/image.png"""
         img_paths = [
-            os.path.join("data", "models", self.voice_name, "image.png"),
-            os.path.join("data", "models", self.voice_name, "image.jpg"),
+            os.path.join(MODELS_DIR, self.voice_name, "image.png"),
+            os.path.join(MODELS_DIR, self.voice_name, "image.jpg"),
         ]
         for img_path in img_paths:
             if os.path.exists(img_path):
@@ -399,7 +400,7 @@ class VoiceCard(QWidget):
         )
         if path:
             import shutil
-            model_dir = os.path.join("data", "models", self.voice_name)
+            model_dir = os.path.join(MODELS_DIR, self.voice_name)
             os.makedirs(model_dir, exist_ok=True)
             ext = os.path.splitext(path)[1]
             dest = os.path.join(model_dir, f"image{ext}")

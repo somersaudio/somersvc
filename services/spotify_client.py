@@ -73,3 +73,4 @@ class SpotifyClient:
         except Exception:
             pass
         return False
+
