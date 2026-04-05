@@ -337,12 +337,19 @@ class TrainingOrchestrator:
 
             exit_code = ssh.exec_command(
                 "cd /workspace && pip install 'rich==13.9.4' -q 2>/dev/null && "
-                "svc train --model-path /workspace/logs/44k",
+                "for attempt in 1 2 3 4 5; do "
+                "echo \"Training attempt $attempt...\"; "
+                "svc train --model-path /workspace/logs/44k; "
+                "EXIT=$?; "
+                "if [ $EXIT -eq 0 ]; then break; fi; "
+                "echo \"Training crashed (exit $EXIT), restarting in 5s...\"; "
+                "sleep 5; "
+                "done",
                 on_stdout=self._log,
                 on_stderr=self._log,
             )
             if exit_code != 0 and not self._stop_requested:
-                raise RuntimeError(f"Training failed (exit code {exit_code})")
+                raise RuntimeError(f"Training failed after retries (exit code {exit_code})")
             if self._stop_requested:
                 self._log("Training stopped by user — downloading model...")
             else:
