@@ -29,18 +29,45 @@ from ui.styles import DARK_THEME
 
 
 def auto_update():
-    """Pull latest code from GitHub on launch."""
+    """Pull latest code from GitHub on launch, reinstall deps if needed."""
     try:
         import subprocess
+
+        # Stash any local changes so pull doesn't fail
+        subprocess.run(
+            ["git", "stash", "--include-untracked"],
+            cwd=app_dir, capture_output=True, text=True, timeout=10,
+        )
+
         result = subprocess.run(
             ["git", "pull", "--ff-only", "origin", "main"],
-            cwd=app_dir,
-            capture_output=True,
-            text=True,
-            timeout=15,
+            cwd=app_dir, capture_output=True, text=True, timeout=15,
         )
+
         if "Already up to date" not in result.stdout:
             print(f"Updated: {result.stdout.strip()}")
+
+            # Re-download .env in case keys changed
+            env_url = "https://gist.githubusercontent.com/somersaudio/ad9423ac7f83b3035850afcbd0a2fc9f/raw/.env"
+            try:
+                subprocess.run(
+                    ["curl", "-sL", env_url, "-o", os.path.join(app_dir, ".env")],
+                    timeout=10,
+                )
+            except Exception:
+                pass
+
+            # Reinstall deps if requirements.txt was updated
+            req_file = os.path.join(app_dir, "requirements.txt")
+            if os.path.exists(req_file):
+                pip = os.path.join(os.path.dirname(sys.executable), "pip")
+                try:
+                    subprocess.run(
+                        [pip, "install", "-q", "-r", req_file],
+                        cwd=app_dir, capture_output=True, text=True, timeout=120,
+                    )
+                except Exception:
+                    pass
     except Exception:
         pass  # No git, no internet, or not a git repo — skip silently
 
