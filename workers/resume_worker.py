@@ -192,15 +192,23 @@ class ResumeWorker(QThread):
 
     def _monitor_training(self, ssh: SSHClient, job_id: str):
         """Tail the training output until the svc train process exits."""
-        # Bail out immediately if svc train is not running
-        exit_code = ssh.exec_command("pgrep -f 'svc train' > /dev/null 2>&1")
-        if exit_code != 0:
+        # Bail out if svc train is not running
+        # Use [s]vc trick so pgrep doesn't match itself in the PTY
+        self._svc_running = False
+        def _check(line):
+            if "YES" in line:
+                self._svc_running = True
+        ssh.exec_command(
+            "ps aux | grep '[s]vc train' | grep -v grep > /dev/null && echo YES || echo NO",
+            on_stdout=_check,
+        )
+        if not self._svc_running:
             self.log_line.emit("Training process already finished.")
             return
         ssh.exec_command(
             "tail -f /workspace/logs/44k/train.log 2>/dev/null &"
             " TAIL_PID=$!;"
-            " while pgrep -f 'svc train' > /dev/null 2>&1; do sleep 5; done;"
+            " while ps aux | grep '[s]vc train' | grep -v grep > /dev/null 2>&1; do sleep 5; done;"
             " kill $TAIL_PID 2>/dev/null",
             on_stdout=self.log_line.emit,
         )
