@@ -1297,6 +1297,8 @@ class _ConvertButton(QWidget):
 class _CreateModelPanel(QWidget):
     """Unified create-a-model panel combining dataset + training in a clean flow."""
     back_clicked = pyqtSignal()
+    training_started = pyqtSignal()
+    training_stopped = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2013,9 +2015,8 @@ class _CreateModelPanel(QWidget):
         try:
             from workers.training_worker import TrainingWorker
             from services.paths import MODELS_DIR, DATASETS_DIR
-            from services.job_store import load_config
+            from services.job_store import load_config, create_job
             from services.dataset_manager import DatasetManager
-            import uuid
 
             config = load_config()
             api_key = config.get("runpod_api_key", "") or os.environ.get("SOMERSVC_RUNPOD_KEY", "")
@@ -2029,7 +2030,8 @@ class _CreateModelPanel(QWidget):
                 return
 
             dataset_mgr = DatasetManager(str(DATASETS_DIR))
-            job_id = str(uuid.uuid4())[:8]
+            job = create_job(name)
+            job_id = job["job_id"]
 
             self._worker = TrainingWorker(
                 job_id=job_id,
@@ -2082,6 +2084,7 @@ class _CreateModelPanel(QWidget):
             self._btn_stop_train.setEnabled(True)
             self._btn_train.setVisible(False)
             self._btn_continue_train.setVisible(False)
+            self.training_started.emit()
         except Exception as e:
             self._on_train_error(str(e))
 
@@ -2119,6 +2122,7 @@ class _CreateModelPanel(QWidget):
         self._progress_bar.setValue(100)
         self._lbl_status.setText("Training complete! Model is ready.")
         self._lbl_status.setStyleSheet("color: rgba(80, 200, 120, 150); font-size: 11px; background: transparent;")
+        self.training_stopped.emit()
 
     def _on_train_error(self, error):
         self._training = False
@@ -2130,6 +2134,7 @@ class _CreateModelPanel(QWidget):
         self._progress_bar.setVisible(False)
         self._lbl_status.setText(f"Error: {error}")
         self._lbl_status.setStyleSheet("color: rgba(255, 100, 100, 150); font-size: 11px; background: transparent;")
+        self.training_stopped.emit()
 
 
 class SimplePage(QWidget):
@@ -2154,9 +2159,13 @@ class SimplePage(QWidget):
         # Create model panel (overlay, hidden by default)
         self._create_panel = _CreateModelPanel(self)
         self._create_panel.back_clicked.connect(self._hide_create_model)
+        self._create_panel.training_started.connect(lambda: self._show_spinner("modeling"))
+        self._create_panel.training_stopped.connect(self._hide_spinner)
         self._create_panel.setVisible(False)
         # Restore last session after a delay (let layout settle)
         QTimer.singleShot(200, self.restore_session)
+        # Check for active training jobs on launch
+        QTimer.singleShot(600, self._check_active_training)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -3913,6 +3922,55 @@ class SimplePage(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Set Output Folder", str(_paths.OUTPUT_DIR))
         if folder:
             _paths.OUTPUT_DIR = folder
+
+    def _check_active_training(self):
+        """Auto-open Create panel and resume if there is an active training job."""
+        from services.job_store import get_active_jobs, load_config
+        active_jobs = get_active_jobs()
+        if not active_jobs:
+            return
+        config = load_config()
+        api_key = config.get("runpod_api_key", "") or os.environ.get("SOMERSVC_RUNPOD_KEY", "")
+        ssh_key = os.path.expanduser(config.get("ssh_key_path", "~/.ssh/id_rsa"))
+        if not api_key:
+            return
+        job = active_jobs[0]
+        speaker = job["speaker_name"]
+        self._show_create_model()
+        panel = self._create_panel
+        panel._select_model(speaker)
+        panel._log.setVisible(True)
+        panel._log.clear_log()
+        panel._log.append_line(f"Found active job: {job['job_id'][:8]} ({job['status']})")
+        panel._log.append_line(f"Speaker: {speaker}")
+        panel._log.append_line("Reconnecting...")
+        panel._lbl_status.setText("Reconnecting to training pod...")
+        panel._btn_train.setEnabled(False)
+        panel._btn_continue_train.setEnabled(False)
+        panel._btn_stop_train.setVisible(True)
+        panel._btn_stop_train.setEnabled(True)
+        panel._btn_train.setVisible(False)
+        panel._btn_continue_train.setVisible(False)
+        panel._progress_bar.setVisible(True)
+        panel._progress_bar.setValue(55)
+        panel._training = True
+        self._show_spinner("modeling")
+        from workers.resume_worker import ResumeWorker
+        panel._resume_worker = ResumeWorker(
+            api_key=api_key,
+            ssh_key_path=ssh_key,
+            models_dir=str(MODELS_DIR),
+        )
+        panel._resume_worker.log_line.connect(panel._on_train_log)
+        panel._resume_worker.status_changed.connect(
+            lambda jid, st: panel._lbl_status.setText(f"Training ({st})")
+        )
+        panel._resume_worker.progress.connect(panel._progress_bar.setValue)
+        panel._resume_worker.job_finished.connect(panel._on_train_done)
+        panel._resume_worker.job_failed.connect(
+            lambda jid, err: panel._on_train_error(err)
+        )
+        panel._resume_worker.start()
 
     def _show_create_model(self):
         self._create_panel._populate_existing_datasets()

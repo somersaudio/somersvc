@@ -192,7 +192,11 @@ class ResumeWorker(QThread):
 
     def _monitor_training(self, ssh: SSHClient, job_id: str):
         """Tail the training output until the svc train process exits."""
-        # Check if training process is still running, and tail its output
+        # Bail out immediately if svc train is not running
+        exit_code = ssh.exec_command("pgrep -f 'svc train' > /dev/null 2>&1")
+        if exit_code != 0:
+            self.log_line.emit("Training process already finished.")
+            return
         ssh.exec_command(
             "tail -f /workspace/logs/44k/train.log 2>/dev/null &"
             " TAIL_PID=$!;"
