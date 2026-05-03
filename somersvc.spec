@@ -72,7 +72,7 @@ except Exception:
 
 # Packages with mypyc-compiled extensions or other surprise binaries — pull everything
 binaries = []
-for pkg in ('mypy', 'runpod', 'click'):
+for pkg in ('mypy', 'runpod', 'click', 'tomli', 'tomli_w'):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -80,6 +80,15 @@ for pkg in ('mypy', 'runpod', 'click'):
         hiddenimports += h
     except Exception:
         pass
+
+# mypyc compiles some packages to standalone top-level .so files at the
+# site-packages root (named like <hash>__mypyc.cpython-NNN-darwin.so).
+# These aren't inside a package, so collect_all/collect_data_files miss them.
+import glob, sysconfig
+site_pkgs = sysconfig.get_paths().get('purelib') or ''
+if site_pkgs:
+    for so in glob.glob(os.path.join(site_pkgs, '*__mypyc.cpython-*.so')):
+        binaries.append((so, '.'))
 
 # Things that bloat the binary needlessly — exclude
 excludes = [
