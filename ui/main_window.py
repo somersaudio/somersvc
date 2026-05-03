@@ -140,6 +140,9 @@ class MainWindow(QMainWindow):
             item.setToolTip(tooltip)
             item.setSizeHint(QSize(180, 48))
             self.sidebar.addItem(item)
+            # Hide all items except Settings
+            if name != "Settings":
+                item.setHidden(True)
 
         main_layout.addWidget(self.sidebar)
 
