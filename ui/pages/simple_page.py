@@ -2027,7 +2027,7 @@ class _CreateModelPanel(QWidget):
         name = self._selected_name.strip()
         if not name:
             return
-        from services.paths import MODELS_DIR
+        from services.paths import MODELS_DIR, DATASETS_DIR
         model_dir = os.path.join(str(MODELS_DIR), name)
         if not os.path.isdir(model_dir):
             return
@@ -2046,7 +2046,60 @@ class _CreateModelPanel(QWidget):
         self._btn_delete_model.setVisible(False)
         self._lbl_status.setText(f"Model \"{name}\" deleted.")
         self._lbl_status.setStyleSheet("color: rgba(255, 255, 255, 60); font-size: 11px; background: transparent;")
-        self._populate_existing_datasets()
+        # Targeted card update — don't full-rebuild the grid (causes overlap glitch)
+        dataset_dir = os.path.join(str(DATASETS_DIR), name)
+        if os.path.isdir(dataset_dir):
+            # Dataset still exists, keep the card but refresh its image
+            self._refresh_card_image(name)
+        else:
+            # No data left for this name — quietly remove just its card
+            self._remove_card_widget(name)
+
+    def _remove_card_widget(self, name: str):
+        """Remove a single model-grid card without disturbing the rest."""
+        for i in range(self._model_grid_layout.count()):
+            item = self._model_grid_layout.itemAt(i)
+            w = item.widget() if item else None
+            if w and getattr(w, "_model_name", None) == name:
+                self._model_grid_layout.takeAt(i)
+                w.setParent(None)
+                w.deleteLater()
+                return
+
+    def _refresh_card_image(self, name: str):
+        """Re-evaluate the image of an existing card after model files changed."""
+        from services.paths import MODELS_DIR
+        from ui.widgets.voice_card import VoiceCard
+        for i in range(self._model_grid_layout.count()):
+            item = self._model_grid_layout.itemAt(i)
+            w = item.widget() if item else None
+            if not w or getattr(w, "_model_name", None) != name:
+                continue
+            # First child QLabel is the image (per _populate_existing_datasets layout)
+            img_lbl = None
+            for child in w.children():
+                if isinstance(child, QLabel) and child.objectName() != "name_lbl":
+                    img_lbl = child
+                    break
+            if img_lbl is None:
+                return
+            model_img = os.path.join(str(MODELS_DIR), name, "image.jpg")
+            thumb_path = os.path.join(self._image_cache_dir, f"{name}.jpg")
+            for img_path in (model_img, thumb_path):
+                if os.path.exists(img_path):
+                    px = QPixmap(img_path)
+                    img_lbl.setPixmap(VoiceCard._make_circular(px, 44))
+                    img_lbl.setStyleSheet("background: transparent;")
+                    return
+            # No image — fall back to initials
+            img_lbl.clear()
+            initials = "".join(p[0].upper() for p in name.split()[:2]) if name else "?"
+            img_lbl.setText(initials)
+            img_lbl.setStyleSheet(
+                "background: rgba(255,255,255,12); border-radius: 22px; "
+                "color: #aaa; font-size: 14px; font-weight: bold;"
+            )
+            return
 
     def _delete_dataset(self):
         name = self._selected_name.strip()
