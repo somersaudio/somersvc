@@ -1864,14 +1864,19 @@ class _CreateModelPanel(QWidget):
         self._check_existing_model(name)
 
     def _check_existing_model(self, name):
-        """Show Continue Training + Delete Model buttons if model has G_*.pth checkpoints."""
+        """Continue-Training requires an SVC G_*.pth; Delete works on any .pth file."""
         from services.paths import MODELS_DIR
         model_dir = os.path.join(str(MODELS_DIR), name)
-        has_checkpoint = False
+        has_svc_checkpoint = False
+        has_any_model = False
         if os.path.isdir(model_dir):
-            has_checkpoint = any(f.startswith("G_") and f.endswith(".pth") for f in os.listdir(model_dir))
-        self._btn_continue_train.setVisible(has_checkpoint)
-        self._btn_delete_model.setVisible(has_checkpoint)
+            files = os.listdir(model_dir)
+            has_svc_checkpoint = any(f.startswith("G_") and f.endswith(".pth") for f in files)
+            has_any_model = any(f.endswith(".pth") for f in files)
+        # Continue Training only makes sense for SVC checkpoints we know how to resume
+        self._btn_continue_train.setVisible(has_svc_checkpoint)
+        # Delete Model is available for any trained model (SVC or RVC)
+        self._btn_delete_model.setVisible(has_any_model)
 
     def _on_new_name_entered(self):
         """User typed a new artist name and pressed Enter."""
