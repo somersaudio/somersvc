@@ -1763,6 +1763,29 @@ class _CreateModelPanel(QWidget):
         else:
             self._clip_waveform.setVisible(False)
 
+    def _copy_clip_as_mono(self, src: str, dst: str):
+        """Copy a clip to dst, summing stereo channels to mono if needed.
+
+        Falls back to a plain copy if soundfile can't read the file.
+        """
+        import shutil
+        try:
+            import soundfile as _sf
+            import numpy as _np
+            audio, sr = _sf.read(src, always_2d=False)
+            if getattr(audio, "ndim", 1) > 1 and audio.shape[1] > 1:
+                # Sum-and-scale to mono. Using mean (= sum / channels) preserves
+                # apparent loudness and avoids clipping for typical content.
+                audio = audio.mean(axis=1).astype(audio.dtype, copy=False)
+                # Preserve subtype (PCM_16, FLOAT, etc.) so we don't bloat files
+                info = _sf.info(src)
+                _sf.write(dst, audio, sr, subtype=info.subtype)
+                return
+        except Exception:
+            pass
+        # Already mono, or unreadable — just byte-copy
+        shutil.copy2(src, dst)
+
     def _split_selected_clip(self):
         """Split selected clip into ~7 second chunks. Only splits if > 10 seconds."""
         row = self._file_list.currentRow()
@@ -1786,6 +1809,9 @@ class _CreateModelPanel(QWidget):
         # Split into ~7 second chunks
         chunk_sec = 7.0
         audio, sr = _sf.read(path)
+        # Mix stereo down to mono so split chunks don't carry an unused channel
+        if getattr(audio, "ndim", 1) > 1 and audio.shape[1] > 1:
+            audio = audio.mean(axis=1).astype(audio.dtype, copy=False)
         parent_dir = os.path.dirname(path)
         stem = os.path.splitext(os.path.basename(path))[0]
         new_paths = []
@@ -2303,15 +2329,18 @@ class _CreateModelPanel(QWidget):
             QMessageBox.warning(self, "No Audio", "Add audio clips first.")
             return
 
-        # Copy clips to dataset dir
+        # Copy clips to dataset dir; stereo files get summed to mono
+        # on the way in so the pod doesn't waste time/bandwidth on a
+        # second channel that gets averaged anyway.
         from services.paths import DATASETS_DIR
         import shutil
         dataset_dir = os.path.join(str(DATASETS_DIR), name)
         os.makedirs(dataset_dir, exist_ok=True)
         for clip in self._clips:
             dest = os.path.join(dataset_dir, os.path.basename(clip))
-            if not os.path.exists(dest):
-                shutil.copy2(clip, dest)
+            if os.path.exists(dest):
+                continue
+            self._copy_clip_as_mono(clip, dest)
 
         self._btn_train.setEnabled(False)
         self._btn_continue_train.setEnabled(False)
