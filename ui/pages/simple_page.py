@@ -1542,6 +1542,36 @@ class _CreateModelPanel(QWidget):
             }
         """)
         opts_row.addWidget(self._txt_epochs)
+
+        # Help "?" — hover shows the Auto-epoch lookup table
+        epochs_help = QLabel("?")
+        epochs_help.setFixedSize(16, 16)
+        epochs_help.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        epochs_help.setCursor(Qt.CursorShape.WhatsThisCursor)
+        epochs_help.setStyleSheet(
+            "QLabel { color: rgba(255,255,255,80); font-size: 11px; font-weight: bold; "
+            "background: rgba(255,255,255,10); border-radius: 8px; }"
+            "QLabel:hover { color: #fff; background: rgba(255,255,255,25); }"
+        )
+        # Rich-text tooltip — Qt's tooltip renders basic HTML and flexes width
+        epochs_help.setToolTip(
+            "<div style='font-size:11px;'>"
+            "<b>Auto epoch picks based on dataset length</b><br><br>"
+            "<table cellspacing='6' cellpadding='2'>"
+            "<tr><td><b>&lt; 3 minutes</b></td><td>3000 epochs</td></tr>"
+            "<tr><td><b>3 – 5 minutes</b></td><td>2500 epochs</td></tr>"
+            "<tr><td><b>5 – 10 minutes</b></td><td>1500 epochs</td></tr>"
+            "<tr><td><b>10 – 30 minutes</b></td><td>500 epochs</td></tr>"
+            "<tr><td><b>30+ minutes</b></td><td>300 epochs</td></tr>"
+            "</table><br>"
+            "Smaller datasets need more passes to converge. Larger ones see "
+            "enough variation per epoch to stop earlier. Type a number to "
+            "override."
+            "</div>"
+        )
+        opts_row.addSpacing(6)
+        opts_row.addWidget(epochs_help)
+
         opts_row.addStretch()
         layout.addLayout(opts_row)
 
