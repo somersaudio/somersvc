@@ -1717,6 +1717,19 @@ class _CreateModelPanel(QWidget):
 
         layout.addStretch()
 
+        # Bottom-left model summary — shows duration trained on, epoch count,
+        # and a one-line suggestion (more data vs more epochs)
+        self._lbl_model_info = QLabel("")
+        self._lbl_model_info.setStyleSheet(
+            "color: rgba(255, 255, 255, 75); font-size: 11px; "
+            "background: transparent; line-height: 1.4em;"
+        )
+        self._lbl_model_info.setWordWrap(True)
+        self._lbl_model_info.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._lbl_model_info.setVisible(False)
+        self._lbl_model_info.setMaximumWidth(420)
+        layout.addWidget(self._lbl_model_info, alignment=Qt.AlignmentFlag.AlignLeft)
+
         # State
         self._clips = []
         self._selected_name = ""
@@ -2366,6 +2379,8 @@ class _CreateModelPanel(QWidget):
         self._update_grid_selection()
         # Show "Continue Training" if model has existing checkpoints
         self._check_existing_model(name)
+        # Bottom-left summary: duration + epochs + recommendation
+        self._update_model_info(name)
 
     def _check_existing_model(self, name):
         """Continue-Training requires an SVC G_*.pth; Delete works on any .pth file."""
@@ -2395,6 +2410,87 @@ class _CreateModelPanel(QWidget):
         self._update_grid_selection()
         self._btn_continue_train.setVisible(False)
         self._btn_delete_model.setVisible(False)
+        self._lbl_model_info.setVisible(False)
+
+    def _update_model_info(self, name: str):
+        """Populate the bottom-left summary for the selected model."""
+        if not name:
+            self._lbl_model_info.setVisible(False)
+            return
+        metadata = self._load_model_metadata(name)
+        if not metadata:
+            self._lbl_model_info.setVisible(False)
+            return
+        # Pull whatever we can from metadata; tolerate missing fields
+        epochs = int(metadata.get("epochs", 0) or 0)
+        duration = float(metadata.get("dataset_duration_s", 0) or 0)
+        clips = int(metadata.get("dataset_clips", 0) or 0)
+        batch = int(metadata.get("batch_size", 16) or 16)
+
+        # If there isn't enough info to even describe it, hide the panel
+        if epochs <= 0 and duration <= 0:
+            self._lbl_model_info.setVisible(False)
+            return
+
+        # Format the duration as M:SS or H:MM:SS
+        if duration >= 3600:
+            h = int(duration // 3600)
+            m = int((duration % 3600) // 60)
+            s = int(duration % 60)
+            dur_str = f"{h}:{m:02d}:{s:02d}"
+        else:
+            m = int(duration // 60)
+            s = int(duration % 60)
+            dur_str = f"{m}:{s:02d}"
+
+        # Same scoring rules used by the badge so the message stays consistent
+        dur_score = 3 if duration >= 600 else (
+            2 if duration >= 300 else (1 if duration >= 120 else 0)
+        )
+        maturity = (epochs * batch / clips) if clips > 0 else 0
+        train_score = 3 if maturity >= 2000 else (
+            2 if maturity >= 800 else (1 if maturity >= 300 else 0)
+        )
+
+        # Build recommendation pointing at the weakest dimension first
+        if dur_score >= 3 and train_score >= 3:
+            rec = "Looks fully trained — try the model first; only retrain if quality is off."
+            rec_color = "rgba(80, 200, 120, 200)"
+        elif dur_score < train_score:
+            needed = {0: "2+ minutes", 1: "5+ minutes", 2: "10+ minutes"}.get(
+                dur_score, "more"
+            )
+            rec = f"Add more training audio (target {needed} of clean vocals) for the biggest quality jump."
+            rec_color = "rgba(245, 158, 11, 200)"  # amber
+        elif train_score < 3:
+            # Suggest a target epoch count that would push to the next tier
+            target_maturity = 2000 if train_score == 2 else (800 if train_score == 1 else 300)
+            extra_epochs = (
+                int((target_maturity - maturity) * clips / max(batch, 1))
+                if clips > 0 else 0
+            )
+            target_epochs = max(epochs + max(extra_epochs, 100), epochs + 100)
+            rec = (
+                f"Continue training to ~{target_epochs} epochs for noticeably better quality."
+            )
+            rec_color = "rgba(85, 153, 255, 220)"  # blue
+        else:
+            rec = "Looks well-trained. Try it before adding more data."
+            rec_color = "rgba(80, 200, 120, 200)"
+
+        epochs_str = f"{epochs:,} epochs" if epochs > 0 else "no epochs yet"
+        if duration > 0:
+            top = f"<b>{dur_str}</b> of training audio · <b>{epochs_str}</b>"
+        else:
+            top = f"<b>{epochs_str}</b>"
+        html = (
+            f"<div style='font-size:11px;'>"
+            f"<span style='color:rgba(255,255,255,90);'>{top}</span><br>"
+            f"<span style='color:{rec_color};'>{rec}</span>"
+            f"</div>"
+        )
+        self._lbl_model_info.setText(html)
+        self._lbl_model_info.setVisible(True)
 
     def _update_grid_selection(self):
         """Update visual selection state — brighten selected name."""
