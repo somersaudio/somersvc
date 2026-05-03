@@ -46,8 +46,11 @@ class TrainingOrchestrator:
                 self.on_log("Saving checkpoint before stopping...")
                 stop_ssh = SSHClient()
                 stop_ssh.connect(self._pod_ip, self._pod_port, self.ssh_key_path)
-                # SIGTERM triggers graceful shutdown — Lightning saves checkpoint before exiting
+                # Drop the sentinel BEFORE killing svc train so the bash retry
+                # loop sees it and exits instead of restarting training.
+                # SIGTERM gives Lightning a chance to save a checkpoint cleanly.
                 stop_ssh.exec_command(
+                    "touch /tmp/somersvc_stop; "
                     "pkill -SIGTERM -f 'svc train' 2>/dev/null; "
                     "echo 'Graceful shutdown signal sent — waiting for checkpoint save...'; "
                     "sleep 8; "
@@ -357,13 +360,17 @@ class TrainingOrchestrator:
                 "BPYEOF\n"
                 "echo Halve helper installed",
             )
+            # Clear any leftover stop sentinel from prior runs on this pod
+            ssh.exec_command("rm -f /tmp/somersvc_stop")
             exit_code = ssh.exec_command(
                 "cd /workspace && pip install 'rich==13.9.4' -q 2>/dev/null && "
                 "for attempt in 1 2 3 4 5; do "
+                "if [ -f /tmp/somersvc_stop ]; then echo \"Stop requested before attempt $attempt — exiting retry loop\"; break; fi; "
                 "echo \"Training attempt $attempt...\"; "
                 "svc train --model-path /workspace/logs/44k 2>&1 | tee /tmp/svc_train.log; "
                 "EXIT=${PIPESTATUS[0]}; "
                 "if [ $EXIT -eq 0 ]; then break; fi; "
+                "if [ -f /tmp/somersvc_stop ]; then echo \"Stop requested — not restarting\"; break; fi; "
                 "if grep -q 'CUDA out of memory\\|OutOfMemoryError' /tmp/svc_train.log; then "
                 "    echo \"OOM detected — halving batch size before retry...\"; "
                 "    python3 /tmp/halve_batch.py || break; "

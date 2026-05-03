@@ -2965,6 +2965,19 @@ class _CreateModelPanel(QWidget):
                     pass
                 # Show the calculated value in the epochs field
                 self._txt_epochs.setText(str(self._recommended_epochs))
+            # Print the target so users can confirm what auto picked.
+            try:
+                import soundfile as _sf
+                total_dur_log = sum(_sf.info(p).duration for p in self._clips)
+                m, s = divmod(int(total_dur_log), 60)
+                self._log.append_line(
+                    f"Target: {self._recommended_epochs} epochs "
+                    f"(dataset duration: {m}:{s:02d}) — training will auto-stop here."
+                )
+            except Exception:
+                self._log.append_line(
+                    f"Target: {self._recommended_epochs} epochs — training will auto-stop here."
+                )
             self._current_epoch = 0
             self._worker.finished_ok.connect(self._on_train_done)
             self._worker.error.connect(self._on_train_error)
