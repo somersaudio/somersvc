@@ -1636,6 +1636,16 @@ class _CreateModelPanel(QWidget):
         self._lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._lbl_status)
 
+        # Epoch counter (e.g. "1/500") above the progress bar
+        self._lbl_epoch = QLabel("")
+        self._lbl_epoch.setStyleSheet(
+            "color: rgba(255, 255, 255, 70); font-size: 11px; "
+            "font-weight: 600; background: transparent;"
+        )
+        self._lbl_epoch.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_epoch.setVisible(False)
+        layout.addWidget(self._lbl_epoch)
+
         from PyQt6.QtWidgets import QProgressBar
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
@@ -2159,6 +2169,8 @@ class _CreateModelPanel(QWidget):
             if rec > 0 and self._current_epoch > 0:
                 pct = min(int((self._current_epoch / rec) * 100), 100)
                 self._progress_bar.setValue(pct)
+                self._lbl_epoch.setText(f"{self._current_epoch}/{rec}")
+                self._lbl_epoch.setVisible(True)
                 self._lbl_status.setText(f"Training... Epoch {self._current_epoch}/{rec}")
             # Auto-stop at target
             if self._current_epoch >= rec:
@@ -2174,6 +2186,7 @@ class _CreateModelPanel(QWidget):
         self._btn_train.setText("Start Training")
         self._check_existing_model(self._selected_name)
         self._progress_bar.setValue(100)
+        self._lbl_epoch.setVisible(False)
         self._lbl_status.setText("Training complete! Model is ready.")
         self._lbl_status.setStyleSheet("color: rgba(80, 200, 120, 150); font-size: 11px; background: transparent;")
         self.training_stopped.emit()
@@ -2186,6 +2199,7 @@ class _CreateModelPanel(QWidget):
         self._btn_train.setText("Start Training")
         self._check_existing_model(self._selected_name)
         self._progress_bar.setVisible(False)
+        self._lbl_epoch.setVisible(False)
         self._lbl_status.setText(f"Error: {error}")
         self._lbl_status.setStyleSheet("color: rgba(255, 100, 100, 150); font-size: 11px; background: transparent;")
         self.training_stopped.emit()
