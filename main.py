@@ -79,6 +79,16 @@ def auto_update():
 
 
 def main():
+    # When the realtime feature re-execs us with --svc-mode, hand off to
+    # the so-vits-svc-fork CLI instead of starting the GUI. This lets the
+    # bundled .app act as its own `svc` binary.
+    if len(sys.argv) > 1 and sys.argv[1] == "--svc-mode":
+        from so_vits_svc_fork.__main__ import cli
+        # The Click CLI parses sys.argv[1:], so reshape to look like `svc <subcmd> ...`
+        sys.argv = ["svc"] + sys.argv[2:]
+        cli()
+        return
+
     auto_update()
 
     app = QApplication(sys.argv)

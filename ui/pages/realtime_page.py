@@ -292,8 +292,15 @@ class RealtimePage(QWidget):
 
         import sys
         svc_bin = os.path.join(os.path.dirname(sys.executable), "svc")
-        cmd = [
-            svc_bin, "vc",
+        if os.path.exists(svc_bin):
+            # Dev mode: the venv has the svc CLI right next to python
+            cmd = [svc_bin, "vc"]
+        else:
+            # Bundled .app: there is no separate svc binary. Re-exec the
+            # frozen SomerSVC binary with --svc-mode and main.py will hand
+            # off to so_vits_svc_fork's CLI.
+            cmd = [sys.executable, "--svc-mode", "vc"]
+        cmd += [
             "-m", model_path,
             "-c", config_path,
             "-s", speaker,
