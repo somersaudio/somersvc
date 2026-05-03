@@ -1763,27 +1763,45 @@ class _CreateModelPanel(QWidget):
         else:
             self._clip_waveform.setVisible(False)
 
-    def _copy_clip_as_mono(self, src: str, dst: str):
-        """Copy a clip to dst, summing stereo channels to mono if needed.
+    def _copy_clip_normalized(self, src: str, dst: str):
+        """Copy a clip into the dataset normalized to 44.1 kHz / 16-bit / mono.
 
-        Falls back to a plain copy if soundfile can't read the file.
+        That's the format so-vits-svc-fork trains on internally. Doing the
+        conversion client-side saves upload bandwidth and pod preprocessing
+        time. Falls back to a plain byte copy if the file can't be parsed.
         """
         import shutil
+        TARGET_SR = 44100
         try:
             import soundfile as _sf
-            import numpy as _np
-            audio, sr = _sf.read(src, always_2d=False)
-            if getattr(audio, "ndim", 1) > 1 and audio.shape[1] > 1:
-                # Sum-and-scale to mono. Using mean (= sum / channels) preserves
-                # apparent loudness and avoids clipping for typical content.
-                audio = audio.mean(axis=1).astype(audio.dtype, copy=False)
-                # Preserve subtype (PCM_16, FLOAT, etc.) so we don't bloat files
-                info = _sf.info(src)
-                _sf.write(dst, audio, sr, subtype=info.subtype)
+            audio, sr = _sf.read(src, always_2d=False, dtype="float32")
+            channels = audio.shape[1] if getattr(audio, "ndim", 1) > 1 else 1
+            info = _sf.info(src)
+            already_mono = channels == 1
+            already_44k = sr == TARGET_SR
+            already_16bit = info.subtype == "PCM_16"
+            # Nothing to do — fast path
+            if already_mono and already_44k and already_16bit:
+                shutil.copy2(src, dst)
                 return
+            # Stereo → mono (mean preserves apparent loudness, avoids clipping)
+            if not already_mono:
+                audio = audio.mean(axis=1)
+            # Resample to 44.1 kHz if needed
+            if not already_44k:
+                try:
+                    import librosa
+                    audio = librosa.resample(audio, orig_sr=sr, target_sr=TARGET_SR)
+                    sr = TARGET_SR
+                except Exception:
+                    # Couldn't resample — write at original sr, pod will fix
+                    pass
+            # Always write as 16-bit PCM (training-ready)
+            _sf.write(dst, audio, sr, subtype="PCM_16")
+            return
         except Exception:
             pass
-        # Already mono, or unreadable — just byte-copy
+        # Unreadable — just byte-copy and let the pod sort it out
         shutil.copy2(src, dst)
 
     def _split_selected_clip(self):
@@ -2329,18 +2347,17 @@ class _CreateModelPanel(QWidget):
             QMessageBox.warning(self, "No Audio", "Add audio clips first.")
             return
 
-        # Copy clips to dataset dir; stereo files get summed to mono
-        # on the way in so the pod doesn't waste time/bandwidth on a
-        # second channel that gets averaged anyway.
+        # Copy clips into the dataset dir, normalized to 44.1 kHz / 16-bit / mono.
+        # That's exactly what so-vits-svc-fork trains on, so doing it locally
+        # saves upload bandwidth and pod preprocessing time.
         from services.paths import DATASETS_DIR
-        import shutil
         dataset_dir = os.path.join(str(DATASETS_DIR), name)
         os.makedirs(dataset_dir, exist_ok=True)
         for clip in self._clips:
             dest = os.path.join(dataset_dir, os.path.basename(clip))
             if os.path.exists(dest):
                 continue
-            self._copy_clip_as_mono(clip, dest)
+            self._copy_clip_normalized(clip, dest)
 
         self._btn_train.setEnabled(False)
         self._btn_continue_train.setEnabled(False)
