@@ -1761,21 +1761,70 @@ class _CreateModelPanel(QWidget):
         self._clips.extend(paths)
         self._refresh_file_list()
 
+    def _trained_files_path(self, name: str) -> str:
+        """Path to the per-model JSON snapshot of trained-on filenames."""
+        from services.paths import MODELS_DIR
+        return os.path.join(str(MODELS_DIR), name, "trained_files.json")
+
+    def _load_trained_set(self, name: str) -> set:
+        """Return the set of basenames the model was last trained on, or empty."""
+        if not name:
+            return set()
+        p = self._trained_files_path(name)
+        if not os.path.exists(p):
+            return set()
+        try:
+            import json
+            with open(p) as f:
+                data = json.load(f) or {}
+            return set(data.get("trained_files", []))
+        except Exception:
+            return set()
+
+    def _save_trained_snapshot(self, name: str, basenames: list = None) -> None:
+        """Write a snapshot of which clips this model was trained on.
+
+        If basenames is None, walks the dataset dir and snapshots whatever
+        is currently there (used right after a successful training run).
+        """
+        from services.paths import MODELS_DIR, DATASETS_DIR
+        if not name:
+            return
+        model_dir = os.path.join(str(MODELS_DIR), name)
+        if not os.path.isdir(model_dir):
+            return
+        if basenames is None:
+            ds_dir = os.path.join(str(DATASETS_DIR), name)
+            if not os.path.isdir(ds_dir):
+                return
+            basenames = sorted(
+                f for f in os.listdir(ds_dir)
+                if f.endswith((".wav", ".flac", ".mp3", ".ogg"))
+            )
+        try:
+            import json
+            with open(self._trained_files_path(name), "w") as f:
+                json.dump({"trained_files": list(basenames)}, f, indent=2)
+        except Exception:
+            pass
+
     def _refresh_file_list(self):
         from PyQt6.QtGui import QBrush, QColor
         self._file_list.clear()
 
         # Resolve the dataset dir for the currently selected model so we can
-        # tell apart "already trained on" clips (live in dataset_dir) from
-        # "newly added, not trained yet" clips (still in their original spot).
+        # tell apart "already trained on" clips from newly-added pending ones.
         from services.paths import MODELS_DIR, DATASETS_DIR
         name = self._selected_name.strip()
         dataset_dir = (
             os.path.realpath(os.path.join(str(DATASETS_DIR), name)) if name else ""
         )
-        # Distinguish "added but never trained" from "added and the model has
-        # since been trained on them" — only color green when a checkpoint
-        # actually exists for this artist.
+        # The authoritative source: trained_files.json snapshot written after
+        # the last successful training run. If it doesn't exist (e.g. legacy
+        # model trained before this feature shipped), fall back to the older
+        # heuristic of "any clip in dataset_dir + a checkpoint exists".
+        trained_set = self._load_trained_set(name)
+        has_snapshot = bool(trained_set)
         has_checkpoint = bool(name) and os.path.isdir(os.path.join(str(MODELS_DIR), name)) and any(
             f.endswith(".pth") for f in os.listdir(os.path.join(str(MODELS_DIR), name))
         )
@@ -1785,6 +1834,10 @@ class _CreateModelPanel(QWidget):
         PENDING = QBrush(QColor(255, 165, 60, 55))   # opaque orange
 
         def _classify(path: str):
+            base = os.path.basename(path)
+            if has_snapshot:
+                return TRAINED if base in trained_set else PENDING
+            # Legacy fallback for models trained before snapshots existed
             in_dataset = (
                 bool(dataset_dir)
                 and os.path.realpath(path).startswith(dataset_dir + os.sep)
@@ -2338,6 +2391,7 @@ class _CreateModelPanel(QWidget):
                     if bundled_dataset:
                         os.makedirs(dataset_dest, exist_ok=True)
 
+                    bundled_basenames = []
                     for member in names:
                         if member.endswith("/"):
                             continue
@@ -2345,6 +2399,8 @@ class _CreateModelPanel(QWidget):
                             # Drop the "<top>/dataset/" prefix and write into datasets dir
                             rel = member[len(dataset_prefix):]
                             out_path = os.path.join(dataset_dest, rel)
+                            if rel.endswith((".wav", ".flac", ".mp3", ".ogg")):
+                                bundled_basenames.append(os.path.basename(rel))
                         elif member.startswith(f"{top}/"):
                             # Strip the top folder; rejoin under model_dest
                             rel = member[len(top) + 1:]
@@ -2356,6 +2412,12 @@ class _CreateModelPanel(QWidget):
                         with zf.open(member) as src, open(out_path, "wb") as dst:
                             shutil.copyfileobj(src, dst)
                     name = top
+                    # If the importer didn't ship a trained_files.json of its own
+                    # but did bundle audio, mark those clips as trained so the
+                    # recipient sees green right away.
+                    snapshot_in_zip = os.path.join(model_dest, "trained_files.json")
+                    if bundled_basenames and not os.path.exists(snapshot_in_zip):
+                        self._save_trained_snapshot(name, sorted(set(bundled_basenames)))
         except Exception as e:
             QMessageBox.warning(self, "Import Failed", str(e))
             return
@@ -2966,6 +3028,9 @@ class _CreateModelPanel(QWidget):
         self._btn_train.setEnabled(True)
         self._btn_train.setText("Start Training")
         self._check_existing_model(self._selected_name)
+        # Snapshot which clips this run actually trained on — the dataset dir
+        # contents at this moment are exactly what got sent to the pod.
+        self._save_trained_snapshot(self._selected_name)
         # Clips that were just trained on now live inside the dataset dir —
         # repoint paths and re-color the list so pending/orange flips to trained/green.
         try:
