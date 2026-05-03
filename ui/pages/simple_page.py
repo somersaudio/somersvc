@@ -2283,8 +2283,8 @@ class _CreateModelPanel(QWidget):
             f"border: 1.5px solid {color}; border-radius: 9px; "
             f"font-size: 8px; font-weight: bold;"
         )
-        # Bottom-right corner (img is 44x44, badge is 18x18)
-        badge.move(44 - 18 + 2, 44 - 18 + 2)
+        # Bottom-right corner — sit fully inside the 44x44 image so nothing clips
+        badge.move(44 - 18, 44 - 18)
         badge.raise_()
         badge.show()
 
