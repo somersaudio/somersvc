@@ -29,7 +29,13 @@ from ui.styles import DARK_THEME
 
 
 def auto_update():
-    """Pull latest code from GitHub on launch, reinstall deps if needed."""
+    """Pull latest code from GitHub on launch, reinstall deps if needed.
+
+    Only runs in dev mode (running from source). The frozen .app uses
+    services.app_updater to check GitHub Releases and self-replace.
+    """
+    if getattr(sys, "frozen", False):
+        return  # Skip git pull when running from a packaged .app
     try:
         import subprocess
 
@@ -93,7 +99,46 @@ def main():
     window = MainWindow()
     window.show()
 
+    # Frozen app: check GitHub Releases for updates after the window is up
+    if getattr(sys, "frozen", False):
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(2000, lambda: _check_app_update(window))
+
     sys.exit(app.exec())
+
+
+def _check_app_update(parent_window):
+    """Check GitHub Releases for a newer .dmg and prompt the user."""
+    try:
+        from services.app_updater import check_for_update, download_and_install
+        from PyQt6.QtWidgets import QMessageBox
+        update = check_for_update()
+        if not update:
+            return
+        msg = QMessageBox(parent_window)
+        msg.setWindowTitle("Update Available")
+        msg.setText(f"A new version of SomerSVC is available: {update['tag']}")
+        notes = (update.get('notes') or '').strip()
+        if notes:
+            msg.setInformativeText(notes[:400])
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        msg.button(QMessageBox.StandardButton.Yes).setText("Install & Restart")
+        msg.button(QMessageBox.StandardButton.No).setText("Later")
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+        ok = download_and_install(update["url"], on_progress=print)
+        if ok:
+            QMessageBox.information(
+                parent_window, "Update Installed",
+                "SomerSVC will restart to apply the update.",
+            )
+            from PyQt6.QtCore import QProcess
+            QProcess.startDetached("/usr/bin/open", ["-a", "/Applications/SomerSVC.app"])
+            from PyQt6.QtWidgets import QApplication
+            QApplication.quit()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

@@ -1,0 +1,52 @@
+name: Build & Release SomerSVC
+
+# Triggered when you push a tag like v1.0.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-mac:
+    runs-on: macos-14  # Apple Silicon (arm64)
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install build deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build .app
+        run: |
+          pyinstaller --noconfirm somersvc.spec
+
+      - name: Create .dmg
+        run: |
+          chmod +x build_dmg.sh
+          ./build_dmg.sh
+
+      - name: Resolve tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .dmg to releases repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -e
+          TAG="${{ steps.tag.outputs.tag }}"
+          DMG_PATH="dist/SomerSVC-${TAG}-arm64.dmg"
+          # Make sure release exists in the public releases repo
+          gh release create "$TAG" --repo somersaudio/somersvc-releases \
+              --title "SomerSVC $TAG" \
+              --notes "Apple Silicon build. After downloading, run:\n\nxattr -d com.apple.quarantine /Applications/SomerSVC.app\n\nThen open normally." \
+              || echo "Release $TAG already exists"
+          gh release upload "$TAG" "$DMG_PATH" --repo somersaudio/somersvc-releases --clobber
