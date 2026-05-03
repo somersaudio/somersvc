@@ -91,6 +91,18 @@ class MainWindow(QMainWindow):
         self._gear_btn_simple.setParent(self._simple_container)
         self._gear_btn_simple.raise_()
 
+        # Version label (bottom-left, subtle)
+        from services.app_updater import get_current_version
+        from PyQt6.QtWidgets import QLabel
+        ver = get_current_version()
+        self._lbl_version = QLabel(f"v{ver}" if ver != "dev" else "dev")
+        self._lbl_version.setParent(self._simple_container)
+        self._lbl_version.setStyleSheet(
+            "color: rgba(255,255,255,30); font-size: 10px; background: transparent;"
+        )
+        self._lbl_version.adjustSize()
+        self._lbl_version.raise_()
+
         self._mode_stack.addWidget(self._simple_container)
 
         # ===== EXPERT MODE =====
@@ -358,7 +370,7 @@ class MainWindow(QMainWindow):
         self._position_gear_buttons()
 
     def _position_gear_buttons(self):
-        """Position gear icons in bottom-right corner."""
+        """Position gear icons in bottom-right corner + version label bottom-left."""
         margin = 16
         for container, btn in [
             (self._simple_container, self._gear_btn_simple),
@@ -369,6 +381,17 @@ class MainWindow(QMainWindow):
             if w > 0 and h > 0:
                 btn.move(w - btn.width() - margin, h - btn.height() - margin)
                 btn.raise_()
+        # Version label, bottom-left of the simple container
+        if hasattr(self, "_lbl_version"):
+            sw = self._simple_container.width()
+            sh = self._simple_container.height()
+            if sw > 0 and sh > 0:
+                self._lbl_version.adjustSize()
+                self._lbl_version.move(
+                    margin,
+                    sh - self._lbl_version.height() - margin,
+                )
+                self._lbl_version.raise_()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
