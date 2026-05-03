@@ -1762,26 +1762,60 @@ class _CreateModelPanel(QWidget):
         self._refresh_file_list()
 
     def _refresh_file_list(self):
+        from PyQt6.QtGui import QBrush, QColor
         self._file_list.clear()
+
+        # Resolve the dataset dir for the currently selected model so we can
+        # tell apart "already trained on" clips (live in dataset_dir) from
+        # "newly added, not trained yet" clips (still in their original spot).
+        from services.paths import MODELS_DIR, DATASETS_DIR
+        name = self._selected_name.strip()
+        dataset_dir = (
+            os.path.realpath(os.path.join(str(DATASETS_DIR), name)) if name else ""
+        )
+        # Distinguish "added but never trained" from "added and the model has
+        # since been trained on them" — only color green when a checkpoint
+        # actually exists for this artist.
+        has_checkpoint = bool(name) and os.path.isdir(os.path.join(str(MODELS_DIR), name)) and any(
+            f.endswith(".pth") for f in os.listdir(os.path.join(str(MODELS_DIR), name))
+        )
+
+        # Translucent overlays — readable over the dark list, accent the row
+        TRAINED = QBrush(QColor(60, 200, 130, 55))   # opaque green
+        PENDING = QBrush(QColor(255, 165, 60, 55))   # opaque orange
+
+        def _classify(path: str):
+            in_dataset = (
+                bool(dataset_dir)
+                and os.path.realpath(path).startswith(dataset_dir + os.sep)
+            )
+            if in_dataset and has_checkpoint:
+                return TRAINED
+            return PENDING
+
         try:
             import soundfile as _sf
             total_dur = 0
             for p in self._clips:
-                name = os.path.basename(p)
+                fname = os.path.basename(p)
                 try:
                     info = _sf.info(p)
                     dur = info.duration
                     total_dur += dur
                     mins, secs = divmod(int(dur), 60)
-                    self._file_list.addItem(f"{name}  ({mins}:{secs:02d})")
+                    item = QListWidgetItem(f"{fname}  ({mins}:{secs:02d})")
                 except Exception:
-                    self._file_list.addItem(name)
+                    item = QListWidgetItem(fname)
+                item.setBackground(_classify(p))
+                self._file_list.addItem(item)
             total = len(self._clips)
             mins, secs = divmod(int(total_dur), 60)
             self._lbl_clips.setText(f"{total} clips  ·  {mins}:{secs:02d} total")
         except Exception:
             for p in self._clips:
-                self._file_list.addItem(os.path.basename(p))
+                item = QListWidgetItem(os.path.basename(p))
+                item.setBackground(_classify(p))
+                self._file_list.addItem(item)
             self._lbl_clips.setText(f"{len(self._clips)} clips added")
 
     def _on_clip_selected(self, row):
@@ -2801,6 +2835,19 @@ class _CreateModelPanel(QWidget):
         self._btn_train.setEnabled(True)
         self._btn_train.setText("Start Training")
         self._check_existing_model(self._selected_name)
+        # Clips that were just trained on now live inside the dataset dir —
+        # repoint paths and re-color the list so pending/orange flips to trained/green.
+        try:
+            from services.paths import DATASETS_DIR
+            ds_dir = os.path.join(str(DATASETS_DIR), self._selected_name)
+            if os.path.isdir(ds_dir):
+                self._clips = [
+                    os.path.join(ds_dir, f) for f in sorted(os.listdir(ds_dir))
+                    if f.endswith(('.wav', '.flac', '.mp3', '.ogg'))
+                ]
+                self._refresh_file_list()
+        except Exception:
+            pass
         self._progress_bar.setValue(100)
         self._lbl_epoch.setVisible(False)
         self._lbl_status.setText("Training complete! Model is ready.")
