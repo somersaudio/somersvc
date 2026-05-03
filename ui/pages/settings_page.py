@@ -79,7 +79,10 @@ class SettingsPage(QWidget):
         setup_box.setStyleSheet("font-weight: bold; color: #ffd76b; font-size: 13px;")
         layout.addWidget(setup_box)
 
-        step1 = QLabel("1.  Click \"Get API Key\" below, sign in, copy your RunPod API key, paste it below.")
+        step1 = QLabel(
+            "1.  Click \"Get API Key\" below. Sign in, then click \"+ Create API Key\" "
+            "(give it any name, e.g. \"SomerSVC\"). Copy the generated key and paste it here."
+        )
         step1.setStyleSheet("color: #aaa; font-size: 12px;")
         step1.setWordWrap(True)
         layout.addWidget(step1)
