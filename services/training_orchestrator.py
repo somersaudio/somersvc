@@ -296,11 +296,11 @@ class TrainingOrchestrator:
                 "except:\n"
                 "    vram_mb = 24000\n"
                 "if vram_mb >= 80000:\n"
-                "    target_batch = 256\n"
+                "    target_batch = 192\n"
                 "elif vram_mb >= 45000:\n"
-                "    target_batch = 128\n"
+                "    target_batch = 96\n"
                 "elif vram_mb >= 20000:\n"
-                "    target_batch = 64\n"
+                "    target_batch = 48\n"
                 "else:\n"
                 "    target_batch = 32\n"
                 "configs = glob.glob('/workspace/configs/*/config.json')\n"
@@ -335,13 +335,37 @@ class TrainingOrchestrator:
                 on_stdout=self._log,
             )
 
+            # Drop a helper script for halving batch_size after an OOM crash
+            ssh.exec_command(
+                "cat > /tmp/halve_batch.py << 'BPYEOF'\n"
+                "import json, glob, sys\n"
+                "min_batch = 4\n"
+                "for cfg_path in glob.glob('/workspace/configs/*/config.json'):\n"
+                "    with open(cfg_path) as f: cfg = json.load(f)\n"
+                "    cur = int(cfg.get('train', {}).get('batch_size', 16))\n"
+                "    new = max(min_batch, cur // 2)\n"
+                "    if new == cur:\n"
+                "        print(f'Already at minimum batch_size={cur}; cannot halve further')\n"
+                "        sys.exit(2)\n"
+                "    cfg.setdefault('train', {})['batch_size'] = new\n"
+                "    cur_lr = cfg['train'].get('learning_rate', 0.0001)\n"
+                "    cfg['train']['learning_rate'] = cur_lr / (2 ** 0.5)\n"
+                "    with open(cfg_path, 'w') as f: json.dump(cfg, f, indent=2)\n"
+                "    print(f'Halved batch_size: {cur} -> {new}, LR scaled accordingly')\n"
+                "BPYEOF\n"
+                "echo Halve helper installed",
+            )
             exit_code = ssh.exec_command(
                 "cd /workspace && pip install 'rich==13.9.4' -q 2>/dev/null && "
                 "for attempt in 1 2 3 4 5; do "
                 "echo \"Training attempt $attempt...\"; "
-                "svc train --model-path /workspace/logs/44k; "
-                "EXIT=$?; "
+                "svc train --model-path /workspace/logs/44k 2>&1 | tee /tmp/svc_train.log; "
+                "EXIT=${PIPESTATUS[0]}; "
                 "if [ $EXIT -eq 0 ]; then break; fi; "
+                "if grep -q 'CUDA out of memory\\|OutOfMemoryError' /tmp/svc_train.log; then "
+                "    echo \"OOM detected — halving batch size before retry...\"; "
+                "    python3 /tmp/halve_batch.py || break; "
+                "fi; "
                 "echo \"Training crashed (exit $EXIT), restarting in 5s...\"; "
                 "sleep 5; "
                 "done",
