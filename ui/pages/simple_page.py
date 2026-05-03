@@ -2238,6 +2238,56 @@ class _CreateModelPanel(QWidget):
                 w.deleteLater()
                 return
 
+    def _load_model_metadata(self, name: str) -> dict:
+        """Load metadata.json for a model, or build a minimal one from disk."""
+        from services.paths import MODELS_DIR
+        import json
+        meta_path = os.path.join(str(MODELS_DIR), name, "metadata.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    return json.load(f) or {}
+            except Exception:
+                pass
+        # Try the model inspector for downloaded RVC/SVC checkpoints
+        try:
+            from services.model_inspector import inspect_model
+            model_dir = os.path.join(str(MODELS_DIR), name)
+            if os.path.isdir(model_dir):
+                return inspect_model(model_dir) or {}
+        except Exception:
+            pass
+        return {}
+
+    def _add_grade_badge(self, img_lbl: QLabel, name: str):
+        """Attach the quality grade badge to the bottom-right of img_lbl.
+        No-op if there's no scoreable data yet."""
+        from ui.widgets.voice_card import grade_for_metadata
+        metadata = self._load_model_metadata(name)
+        if not metadata:
+            return
+        grade, color, tip = grade_for_metadata(metadata)
+        if grade in ("--", "?"):
+            return
+        # Tag/replace any earlier badge so refreshes don't pile up
+        existing = img_lbl.findChild(QLabel, "grade_badge")
+        if existing:
+            existing.deleteLater()
+        badge = QLabel(grade, img_lbl)
+        badge.setObjectName("grade_badge")
+        badge.setFixedSize(18, 18)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setToolTip(tip)
+        badge.setStyleSheet(
+            f"background-color: #1e1e1e; color: {color}; "
+            f"border: 1.5px solid {color}; border-radius: 9px; "
+            f"font-size: 8px; font-weight: bold;"
+        )
+        # Bottom-right corner (img is 44x44, badge is 18x18)
+        badge.move(44 - 18 + 2, 44 - 18 + 2)
+        badge.raise_()
+        badge.show()
+
     def _refresh_card_image(self, name: str):
         """Re-evaluate the image of an existing card after model files changed."""
         from services.paths import MODELS_DIR
@@ -2262,6 +2312,7 @@ class _CreateModelPanel(QWidget):
                     px = QPixmap(img_path)
                     img_lbl.setPixmap(VoiceCard._make_circular(px, 44))
                     img_lbl.setStyleSheet("background: transparent;")
+                    self._add_grade_badge(img_lbl, name)
                     return
             # No image — fall back to initials
             img_lbl.clear()
@@ -2271,6 +2322,7 @@ class _CreateModelPanel(QWidget):
                 "background: rgba(255,255,255,12); border-radius: 22px; "
                 "color: #aaa; font-size: 14px; font-weight: bold;"
             )
+            self._add_grade_badge(img_lbl, name)
             return
 
     def _delete_dataset(self):
@@ -2410,6 +2462,8 @@ class _CreateModelPanel(QWidget):
                 img_lbl.setText(initials)
                 img_lbl.setStyleSheet("background: rgba(255,255,255,12); border-radius: 22px; color: #aaa; font-size: 14px; font-weight: bold;")
             card_layout.addWidget(img_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+            # Quality grade badge overlaid on the bottom-right of the image
+            self._add_grade_badge(img_lbl, name)
 
             # Name
             name_lbl = QLabel(name)

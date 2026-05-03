@@ -27,6 +27,70 @@ class _ClickableLabel(QLabel):
         self.clicked.emit()
 
 
+def grade_for_metadata(metadata: dict) -> tuple[str, str, str]:
+    """Free-function form of VoiceCard._compute_grade so other UI surfaces
+    can show the same badge. Returns (grade, color, tooltip).
+    """
+    metadata = metadata or {}
+    epochs = metadata.get("epochs", 0)
+    duration = metadata.get("dataset_duration_s", 0)
+    clips = metadata.get("dataset_clips", 0)
+    batch = metadata.get("batch_size", 16)
+
+    # Downloaded models without full training data fall back to inspector grade
+    if clips == 0 and (metadata.get("sample_rate") or metadata.get("rvc_version")):
+        from services.model_inspector import compute_downloaded_grade
+        return compute_downloaded_grade(metadata)
+
+    if epochs == 0 or clips == 0:
+        return ("--", "#555", "No training data yet")
+
+    data_passes = epochs * batch
+    dur_min = int(duration) // 60
+    dur_sec = int(duration) % 60
+
+    if duration >= 600:
+        dur_score, dur_tip = 3, "Audio: Excellent (10+ min)"
+    elif duration >= 300:
+        dur_score, dur_tip = 2, "Audio: Good (5-10 min)"
+    elif duration >= 120:
+        dur_score, dur_tip = 1, f"Audio: Fair ({dur_min}:{dur_sec:02d})"
+    else:
+        dur_score, dur_tip = 0, f"Audio: Low ({dur_min}:{dur_sec:02d})"
+
+    maturity = data_passes / clips
+    if maturity >= 2000:
+        train_score, train_tip = 3, "Training: Fully converged"
+    elif maturity >= 800:
+        train_score, train_tip = 2, "Training: Well trained"
+    elif maturity >= 300:
+        train_score, train_tip = 1, "Training: Partially trained"
+    else:
+        train_score, train_tip = 0, "Training: Undertrained"
+
+    total = dur_score + train_score
+    grades = {
+        6: ("S",  "#a855f7"),
+        5: ("A+", "#22c55e"),
+        4: ("A",  "#22c55e"),
+        3: ("B+", "#5599ff"),
+        2: ("B",  "#5599ff"),
+        1: ("C",  "#f59e0b"),
+        0: ("D",  "#ef4444"),
+    }
+    grade, color = grades.get(total, ("?", "#888"))
+
+    tips = [f"Quality: {grade}", "", dur_tip, train_tip, ""]
+    if dur_score < 3:
+        needed = {0: "2+ minutes", 1: "5+ minutes", 2: "10+ minutes"}
+        tips.append(f"Add more audio samples ({needed.get(dur_score, '')} total)")
+    if train_score < 3:
+        tips.append("Train for more epochs to improve quality")
+    if dur_score >= 3 and train_score >= 3:
+        tips.append("Maximum quality reached!")
+    return (grade, color, "\n".join(tips))
+
+
 class VoiceCard(QWidget):
     """A card displaying voice info with artist image, name, creator, and epoch count."""
     clicked = pyqtSignal(str)  # voice name
