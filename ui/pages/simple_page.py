@@ -2031,6 +2031,63 @@ class _CreateModelPanel(QWidget):
             self._clips.pop(row)
             self._refresh_file_list()
 
+    def _ask_export_options(self, name: str, dataset_files: list, dataset_dur: float):
+        """Show a small dialog asking whether to bundle training data.
+
+        Returns True/False for the checkbox state, or None if user cancelled.
+        """
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import (
+            QDialog, QLabel, QCheckBox, QDialogButtonBox, QVBoxLayout,
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Export Model")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(380)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(20, 20, 20, 16)
+        v.setSpacing(12)
+
+        title = QLabel(f"Export <b>{name}</b>")
+        title.setStyleSheet("color: #ddd; font-size: 13px;")
+        v.addWidget(title)
+
+        # Build the checkbox label, fall back gracefully if no dataset on disk
+        if dataset_files:
+            mins = int(dataset_dur) // 60
+            secs = int(dataset_dur) % 60
+            chk_label = (
+                f"Include training data ({len(dataset_files)} "
+                f"{'file' if len(dataset_files) == 1 else 'files'} · {mins}:{secs:02d})"
+            )
+        else:
+            chk_label = "Include training data (none on disk)"
+        chk = QCheckBox(chk_label)
+        chk.setEnabled(bool(dataset_files))
+        chk.setChecked(False)
+        chk.setStyleSheet("color: #ccc; font-size: 12px;")
+        v.addWidget(chk)
+
+        hint = QLabel(
+            "Bundles your audio clips alongside the model so it can be "
+            "retrained or extended on another machine."
+        )
+        hint.setStyleSheet("color: rgba(255,255,255,80); font-size: 11px;")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Continue")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        v.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return chk.isChecked()
+
     def _export_model_file(self):
         """Export the currently-selected model as a .svc zip with a progress dialog."""
         name = self._selected_name.strip()
@@ -2039,7 +2096,7 @@ class _CreateModelPanel(QWidget):
                 self, "Pick a Model", "Select a trained model first to export it."
             )
             return
-        from services.paths import MODELS_DIR
+        from services.paths import MODELS_DIR, DATASETS_DIR
         model_dir = os.path.join(str(MODELS_DIR), name)
         if not os.path.isdir(model_dir):
             QMessageBox.warning(self, "No Model", f"No trained model found for \"{name}\".")
@@ -2048,6 +2105,30 @@ class _CreateModelPanel(QWidget):
             QMessageBox.warning(self, "No Model", f"\"{name}\" has no checkpoint to export yet.")
             return
 
+        # Inspect the dataset (if any) so we can show count + duration in the
+        # checkbox label and decide whether to bundle it.
+        dataset_dir = os.path.join(str(DATASETS_DIR), name)
+        dataset_files = []
+        dataset_dur = 0.0
+        if os.path.isdir(dataset_dir):
+            try:
+                import soundfile as _sf
+                for f in sorted(os.listdir(dataset_dir)):
+                    if not f.endswith(('.wav', '.flac', '.mp3', '.ogg')):
+                        continue
+                    full = os.path.join(dataset_dir, f)
+                    dataset_files.append(full)
+                    try:
+                        dataset_dur += _sf.info(full).duration
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        include_dataset = self._ask_export_options(name, dataset_files, dataset_dur)
+        if include_dataset is None:
+            return  # user cancelled
+
         save_path, _ = QFileDialog.getSaveFileName(
             self, "Export Model",
             os.path.expanduser(f"~/Desktop/{name}.svc"),
@@ -2055,6 +2136,9 @@ class _CreateModelPanel(QWidget):
         )
         if not save_path:
             return
+
+        # If user opted in, hand the dataset paths to the worker
+        bundled_dataset = dataset_files if include_dataset else []
 
         from PyQt6.QtCore import Qt, QThread, pyqtSignal
         from PyQt6.QtWidgets import (
@@ -2065,11 +2149,12 @@ class _CreateModelPanel(QWidget):
             progress = pyqtSignal(int, str)   # percent, status text
             done = pyqtSignal(bool, str)      # ok, error_or_empty
 
-            def __init__(self, model_dir, save_path, name):
+            def __init__(self, model_dir, save_path, name, dataset_paths=None):
                 super().__init__()
                 self.model_dir = model_dir
                 self.save_path = save_path
                 self.name = name
+                self.dataset_paths = dataset_paths or []
 
             def run(self):
                 import os, zipfile
@@ -2089,6 +2174,19 @@ class _CreateModelPanel(QWidget):
                                 size = 0
                             file_list.append((full, arcname, size))
                             total_bytes += size
+                    # Add training data files under <name>/dataset/<basename>
+                    for full in self.dataset_paths:
+                        if not os.path.isfile(full):
+                            continue
+                        arcname = os.path.join(
+                            self.name, "dataset", os.path.basename(full)
+                        )
+                        try:
+                            size = os.path.getsize(full)
+                        except OSError:
+                            size = 0
+                        file_list.append((full, arcname, size))
+                        total_bytes += size
                     if total_bytes <= 0:
                         total_bytes = 1  # avoid zero-division
 
@@ -2140,7 +2238,7 @@ class _CreateModelPanel(QWidget):
         hint.setStyleSheet("color: rgba(255,255,255,80); font-size: 11px;")
         v.addWidget(hint)
 
-        worker = _ExportWorker(model_dir, save_path, name)
+        worker = _ExportWorker(model_dir, save_path, name, bundled_dataset)
 
         def _on_progress(pct: int, text: str):
             bar.setValue(pct)
@@ -2199,7 +2297,12 @@ class _CreateModelPanel(QWidget):
                     if f.endswith(".index"):
                         shutil.copy2(os.path.join(pth_dir, f), os.path.join(dest, f))
             else:
-                # .svc or .zip - extract preserving the top-level folder name
+                # .svc or .zip - route model files into MODELS_DIR/<name>,
+                # and any bundled training audio under dataset/ into
+                # DATASETS_DIR/<name>.
+                from services.paths import DATASETS_DIR
+                datasets_root = str(DATASETS_DIR)
+                os.makedirs(datasets_root, exist_ok=True)
                 with zipfile.ZipFile(path, "r") as zf:
                     names = zf.namelist()
                     if not names:
@@ -2213,8 +2316,9 @@ class _CreateModelPanel(QWidget):
                             "No model checkpoint (.pth) found in this file."
                         )
                         return
-                    dest = os.path.join(models_root, top)
-                    if os.path.exists(dest):
+                    model_dest = os.path.join(models_root, top)
+                    dataset_dest = os.path.join(datasets_root, top)
+                    if os.path.exists(model_dest):
                         reply = QMessageBox.question(
                             self, "Overwrite?",
                             f"A model named \"{top}\" already exists. Replace it?",
@@ -2222,8 +2326,35 @@ class _CreateModelPanel(QWidget):
                         )
                         if reply != QMessageBox.StandardButton.Yes:
                             return
-                        shutil.rmtree(dest, ignore_errors=True)
-                    zf.extractall(models_root)
+                        shutil.rmtree(model_dest, ignore_errors=True)
+                    os.makedirs(model_dest, exist_ok=True)
+
+                    # Walk entries: split on the bundled-dataset prefix
+                    dataset_prefix = f"{top}/dataset/"
+                    bundled_dataset = any(
+                        n.startswith(dataset_prefix) and not n.endswith("/")
+                        for n in names
+                    )
+                    if bundled_dataset:
+                        os.makedirs(dataset_dest, exist_ok=True)
+
+                    for member in names:
+                        if member.endswith("/"):
+                            continue
+                        if member.startswith(dataset_prefix):
+                            # Drop the "<top>/dataset/" prefix and write into datasets dir
+                            rel = member[len(dataset_prefix):]
+                            out_path = os.path.join(dataset_dest, rel)
+                        elif member.startswith(f"{top}/"):
+                            # Strip the top folder; rejoin under model_dest
+                            rel = member[len(top) + 1:]
+                            out_path = os.path.join(model_dest, rel)
+                        else:
+                            # Unprefixed entry — drop into model_dest as a fallback
+                            out_path = os.path.join(model_dest, member)
+                        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                        with zf.open(member) as src, open(out_path, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
                     name = top
         except Exception as e:
             QMessageBox.warning(self, "Import Failed", str(e))
