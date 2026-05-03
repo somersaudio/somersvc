@@ -2166,6 +2166,8 @@ class SimplePage(QWidget):
         QTimer.singleShot(200, self.restore_session)
         # Check for active training jobs on launch
         QTimer.singleShot(600, self._check_active_training)
+        # Clean up orphaned pods on launch
+        QTimer.singleShot(800, self._cleanup_orphaned_pods)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -3922,6 +3924,35 @@ class SimplePage(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Set Output Folder", str(_paths.OUTPUT_DIR))
         if folder:
             _paths.OUTPUT_DIR = folder
+
+    def _cleanup_orphaned_pods(self):
+        """Terminate any leftover RunPod instances that have no active job."""
+        from services.job_store import load_config
+        config = load_config()
+        api_key = config.get("runpod_api_key", "") or os.environ.get("SOMERSVC_RUNPOD_KEY", "")
+        if not api_key:
+            return
+
+        class _CleanupWorker(QThread):
+            done = pyqtSignal(list)
+            def __init__(self, key):
+                super().__init__()
+                self.key = key
+            def run(self):
+                try:
+                    from services.pod_cleanup import cleanup_orphaned_pods
+                    actions = cleanup_orphaned_pods(self.key)
+                    self.done.emit(actions)
+                except Exception:
+                    self.done.emit([])
+
+        self._cleanup_worker = _CleanupWorker(api_key)
+        self._cleanup_worker.done.connect(self._on_cleanup_done)
+        self._cleanup_worker.start()
+
+    def _on_cleanup_done(self, actions):
+        for pod_id, action, reason in actions:
+            print(f"Pod cleanup: {pod_id} {action} ({reason})")
 
     def _check_active_training(self):
         """Auto-open Create panel and resume if there is an active training job."""
