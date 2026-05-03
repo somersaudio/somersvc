@@ -43,10 +43,14 @@ jobs:
         run: |
           set -e
           TAG="${{ steps.tag.outputs.tag }}"
-          DMG_PATH="dist/SomerSVC-${TAG}-arm64.dmg"
+          DMG_VERSIONED="dist/SomerSVC-${TAG}-arm64.dmg"
+          DMG_STABLE="dist/SomerSVC-arm64.dmg"
+          # Provide a stable-named copy for the /releases/latest/download/ shortcut
+          cp "$DMG_VERSIONED" "$DMG_STABLE"
           # Make sure release exists in the public releases repo
           gh release create "$TAG" --repo somersaudio/somersvc-releases \
               --title "SomerSVC $TAG" \
               --notes "Apple Silicon build. After downloading, run:\n\nxattr -d com.apple.quarantine /Applications/SomerSVC.app\n\nThen open normally." \
               || echo "Release $TAG already exists"
-          gh release upload "$TAG" "$DMG_PATH" --repo somersaudio/somersvc-releases --clobber
+          gh release upload "$TAG" "$DMG_VERSIONED" "$DMG_STABLE" \
+              --repo somersaudio/somersvc-releases --clobber
