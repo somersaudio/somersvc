@@ -1763,6 +1763,97 @@ class _CreateModelPanel(QWidget):
         else:
             self._clip_waveform.setVisible(False)
 
+    def _normalize_clips_with_progress(self, pending: list) -> bool:
+        """Normalize the given (src, dst) pairs in a worker with a progress dialog.
+
+        Returns True if the user cancelled, False if completed normally.
+        """
+        from PyQt6.QtCore import Qt, QThread, pyqtSignal
+        from PyQt6.QtWidgets import (
+            QApplication, QDialog, QLabel, QProgressBar, QVBoxLayout, QPushButton,
+        )
+
+        copy_fn = self._copy_clip_normalized
+
+        class _NormalizeWorker(QThread):
+            progress = pyqtSignal(int, int, str)   # done, total, current filename
+            done = pyqtSignal(bool, str)            # ok, error_or_empty
+
+            def __init__(self, jobs):
+                super().__init__()
+                self.jobs = jobs
+                self._cancel = False
+
+            def cancel(self):
+                self._cancel = True
+
+            def run(self):
+                try:
+                    total = len(self.jobs)
+                    for i, (src, dst) in enumerate(self.jobs, 1):
+                        if self._cancel:
+                            self.done.emit(False, "cancelled")
+                            return
+                        self.progress.emit(i - 1, total, os.path.basename(src))
+                        copy_fn(src, dst)
+                    self.progress.emit(total, total, "")
+                    self.done.emit(True, "")
+                except Exception as e:
+                    self.done.emit(False, str(e))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Preparing Clips")
+        dlg.setModal(True)
+        dlg.setFixedSize(440, 150)
+        dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(20, 20, 20, 20)
+        v.setSpacing(10)
+        lbl = QLabel(f"Preparing {len(pending)} clips...")
+        lbl.setStyleSheet("color: #ddd; font-size: 13px;")
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+        bar = QProgressBar()
+        bar.setRange(0, len(pending))
+        v.addWidget(bar)
+        hint = QLabel("Converting to 44.1 kHz / 16-bit / mono for fastest training.")
+        hint.setStyleSheet("color: rgba(255,255,255,80); font-size: 11px;")
+        v.addWidget(hint)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedWidth(80)
+        v.addWidget(cancel_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        worker = _NormalizeWorker(pending)
+        result = {"cancelled": False, "error": ""}
+
+        def _on_progress(done: int, total: int, current: str):
+            bar.setValue(done)
+            if current:
+                lbl.setText(f"Preparing clip {done + 1}/{total}: {current}")
+            else:
+                lbl.setText(f"Preparing clips... done")
+            QApplication.processEvents()
+
+        def _on_done(ok: bool, err: str):
+            if not ok:
+                if err == "cancelled":
+                    result["cancelled"] = True
+                else:
+                    result["error"] = err
+            dlg.accept()
+
+        cancel_btn.clicked.connect(lambda: (worker.cancel(), cancel_btn.setEnabled(False)))
+        worker.progress.connect(_on_progress)
+        worker.done.connect(_on_done)
+        worker.start()
+        dlg.exec()
+        worker.wait()  # ensure worker fully exits before we continue
+
+        if result["error"]:
+            QMessageBox.warning(self, "Preparation Failed", result["error"])
+            return True
+        return result["cancelled"]
+
     def _copy_clip_normalized(self, src: str, dst: str):
         """Copy a clip into the dataset normalized to 44.1 kHz / 16-bit / mono.
 
@@ -2347,17 +2438,24 @@ class _CreateModelPanel(QWidget):
             QMessageBox.warning(self, "No Audio", "Add audio clips first.")
             return
 
-        # Copy clips into the dataset dir, normalized to 44.1 kHz / 16-bit / mono.
-        # That's exactly what so-vits-svc-fork trains on, so doing it locally
-        # saves upload bandwidth and pod preprocessing time.
+        # Stage clips into the dataset dir, normalized to 44.1 kHz / 16-bit / mono.
+        # Done in a background thread with a progress dialog so the UI stays
+        # responsive even on big datasets that need resampling.
         from services.paths import DATASETS_DIR
         dataset_dir = os.path.join(str(DATASETS_DIR), name)
         os.makedirs(dataset_dir, exist_ok=True)
+
+        # Build the work list: only files that don't already exist in dataset_dir
+        pending = []
         for clip in self._clips:
             dest = os.path.join(dataset_dir, os.path.basename(clip))
-            if os.path.exists(dest):
-                continue
-            self._copy_clip_normalized(clip, dest)
+            if not os.path.exists(dest):
+                pending.append((clip, dest))
+
+        if pending:
+            cancelled = self._normalize_clips_with_progress(pending)
+            if cancelled:
+                return
 
         self._btn_train.setEnabled(False)
         self._btn_continue_train.setEnabled(False)
