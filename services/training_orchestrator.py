@@ -315,6 +315,8 @@ class TrainingOrchestrator:
                 "    scale = target_batch / original_batch\n"
                 "    new_lr = original_lr * (scale ** 0.5)\n"
                 "    cfg['train']['learning_rate'] = new_lr\n"
+                "    # Log every step so users see real-time progress in the app\n"
+                "    cfg['train']['log_interval'] = 1\n"
                 "    with open(cfg_path, 'w') as f:\n"
                 "        json.dump(cfg, f, indent=2)\n"
                 "    print(f'VRAM: {vram_mb}MB | Batch: {original_batch} -> {target_batch} | LR: {original_lr} -> {new_lr:.6f}')\n"
