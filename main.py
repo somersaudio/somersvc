@@ -110,7 +110,7 @@ def main():
 def _check_app_update(parent_window):
     """Check GitHub Releases for a newer .dmg and prompt the user."""
     try:
-        from services.app_updater import check_for_update, download_and_install
+        from services.app_updater import check_for_update
         from PyQt6.QtWidgets import QMessageBox
         update = check_for_update()
         if not update:
@@ -127,18 +127,96 @@ def _check_app_update(parent_window):
         msg.button(QMessageBox.StandardButton.No).setText("Later")
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
-        ok = download_and_install(update["url"], on_progress=print)
-        if ok:
-            QMessageBox.information(
-                parent_window, "Update Installed",
-                "SomerSVC will restart to apply the update.",
-            )
-            from PyQt6.QtCore import QProcess
-            QProcess.startDetached("/usr/bin/open", ["-a", "/Applications/SomerSVC.app"])
-            from PyQt6.QtWidgets import QApplication
-            QApplication.quit()
+        _run_update_with_progress(parent_window, update["url"])
     except Exception:
         pass
+
+
+def _run_update_with_progress(parent_window, asset_url: str):
+    """Download + install the new .dmg in a background thread with a progress dialog."""
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal
+    from PyQt6.QtWidgets import (
+        QApplication, QDialog, QLabel, QProgressBar, QVBoxLayout, QMessageBox,
+    )
+    from PyQt6.QtCore import QProcess
+    from services.app_updater import download_and_install
+    import re
+
+    class _Worker(QThread):
+        progress = pyqtSignal(int, str)   # percent (0-100, -1=unknown), status text
+        done = pyqtSignal(bool)
+
+        def __init__(self, url):
+            super().__init__()
+            self.url = url
+
+        def run(self):
+            def on_msg(text: str):
+                m = re.search(r"(\d+)%", text)
+                if m:
+                    self.progress.emit(int(m.group(1)), text)
+                else:
+                    self.progress.emit(-1, text)
+            ok = download_and_install(self.url, on_progress=on_msg)
+            self.done.emit(ok)
+
+    dlg = QDialog(parent_window)
+    dlg.setWindowTitle("Installing Update")
+    dlg.setModal(True)
+    dlg.setFixedSize(420, 130)
+    # Block the close button so the user can't half-quit during install
+    dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+
+    layout = QVBoxLayout(dlg)
+    layout.setContentsMargins(20, 20, 20, 20)
+    layout.setSpacing(10)
+
+    lbl_status = QLabel("Preparing update...")
+    lbl_status.setStyleSheet("color: #ddd; font-size: 13px;")
+    layout.addWidget(lbl_status)
+
+    bar = QProgressBar()
+    bar.setRange(0, 100)
+    bar.setValue(0)
+    bar.setTextVisible(True)
+    layout.addWidget(bar)
+
+    lbl_hint = QLabel("This usually takes 1-2 minutes. The app will restart automatically.")
+    lbl_hint.setStyleSheet("color: rgba(255,255,255,80); font-size: 11px;")
+    lbl_hint.setWordWrap(True)
+    layout.addWidget(lbl_hint)
+
+    worker = _Worker(asset_url)
+
+    def _on_progress(pct: int, text: str):
+        if pct >= 0:
+            bar.setRange(0, 100)
+            bar.setValue(pct)
+        else:
+            # Unknown progress — switch the bar to an indeterminate animation
+            bar.setRange(0, 0)
+        lbl_status.setText(text)
+        QApplication.processEvents()
+
+    def _on_done(ok: bool):
+        if ok:
+            bar.setRange(0, 100)
+            bar.setValue(100)
+            lbl_status.setText("Update installed! Restarting...")
+            QApplication.processEvents()
+            QProcess.startDetached("/usr/bin/open", ["-a", "/Applications/SomerSVC.app"])
+            QApplication.quit()
+        else:
+            dlg.reject()
+            QMessageBox.warning(
+                parent_window, "Update Failed",
+                "The update could not be installed. You can try again later from the app.",
+            )
+
+    worker.progress.connect(_on_progress)
+    worker.done.connect(_on_done)
+    worker.start()
+    dlg.exec()
 
 
 if __name__ == "__main__":
