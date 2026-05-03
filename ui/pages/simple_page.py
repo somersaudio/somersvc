@@ -2181,6 +2181,13 @@ class _CreateModelPanel(QWidget):
         self._btn_delete_model.setVisible(False)
         self._lbl_status.setText(f"Model \"{name}\" deleted.")
         self._lbl_status.setStyleSheet("color: rgba(255, 255, 255, 60); font-size: 11px; background: transparent;")
+        # Auto-clear the message after 20s so it doesn't linger forever.
+        # Captured text guards against clearing a later status set by other code.
+        deleted_text = self._lbl_status.text()
+        def _clear_if_unchanged():
+            if self._lbl_status.text() == deleted_text:
+                self._lbl_status.setText("")
+        QTimer.singleShot(20_000, _clear_if_unchanged)
         # Targeted card update — don't full-rebuild the grid (causes overlap glitch)
         dataset_dir = os.path.join(str(DATASETS_DIR), name)
         if os.path.isdir(dataset_dir):
