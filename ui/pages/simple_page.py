@@ -1609,6 +1609,27 @@ class _CreateModelPanel(QWidget):
         train_row.addWidget(self._btn_stop_train)
         layout.addLayout(train_row)
 
+        # Delete Model button (only visible when a trained model exists)
+        self._btn_delete_model = QPushButton("Delete Model")
+        self._btn_delete_model.setFixedHeight(32)
+        self._btn_delete_model.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_delete_model.setVisible(False)
+        self._btn_delete_model.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: rgba(255, 100, 100, 110);
+                border: 1px solid rgba(255, 100, 100, 50);
+                border-radius: 6px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 80, 80, 25);
+                color: rgba(255, 130, 130, 200);
+            }
+        """)
+        self._btn_delete_model.clicked.connect(self._delete_model)
+        layout.addWidget(self._btn_delete_model)
+
         # Progress / Status
         self._lbl_status = QLabel("")
         self._lbl_status.setStyleSheet("color: rgba(255, 255, 255, 50); font-size: 11px; background: transparent;")
@@ -1774,6 +1795,32 @@ class _CreateModelPanel(QWidget):
             self._clips.pop(row)
             self._refresh_file_list()
 
+    def _delete_model(self):
+        """Delete the trained model files (the dataset stays put)."""
+        name = self._selected_name.strip()
+        if not name:
+            return
+        from services.paths import MODELS_DIR
+        model_dir = os.path.join(str(MODELS_DIR), name)
+        if not os.path.isdir(model_dir):
+            return
+        reply = QMessageBox.question(
+            self, "Delete Model",
+            f"Delete the trained model \"{name}\"? "
+            f"This removes the model checkpoint from your app. "
+            f"The dataset and audio clips will be kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        import shutil
+        shutil.rmtree(model_dir, ignore_errors=True)
+        self._btn_continue_train.setVisible(False)
+        self._btn_delete_model.setVisible(False)
+        self._lbl_status.setText(f"Model \"{name}\" deleted.")
+        self._lbl_status.setStyleSheet("color: rgba(255, 255, 255, 60); font-size: 11px; background: transparent;")
+        self._populate_existing_datasets()
+
     def _delete_dataset(self):
         name = self._selected_name.strip()
         if not name:
@@ -1817,13 +1864,14 @@ class _CreateModelPanel(QWidget):
         self._check_existing_model(name)
 
     def _check_existing_model(self, name):
-        """Show Continue Training button if model has G_*.pth checkpoints."""
+        """Show Continue Training + Delete Model buttons if model has G_*.pth checkpoints."""
         from services.paths import MODELS_DIR
         model_dir = os.path.join(str(MODELS_DIR), name)
         has_checkpoint = False
         if os.path.isdir(model_dir):
             has_checkpoint = any(f.startswith("G_") and f.endswith(".pth") for f in os.listdir(model_dir))
         self._btn_continue_train.setVisible(has_checkpoint)
+        self._btn_delete_model.setVisible(has_checkpoint)
 
     def _on_new_name_entered(self):
         """User typed a new artist name and pressed Enter."""
@@ -1837,6 +1885,7 @@ class _CreateModelPanel(QWidget):
         self._refresh_file_list()
         self._update_grid_selection()
         self._btn_continue_train.setVisible(False)
+        self._btn_delete_model.setVisible(False)
 
     def _update_grid_selection(self):
         """Update visual selection state — brighten selected name."""
