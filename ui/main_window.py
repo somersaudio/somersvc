@@ -85,8 +85,8 @@ class MainWindow(QMainWindow):
             }
             QPushButton:hover { background: rgba(255,255,255,12); color: #aaa; }
         """)
-        self._gear_btn_simple.setToolTip("Switch to Expert Mode")
-        self._gear_btn_simple.clicked.connect(self._toggle_mode)
+        self._gear_btn_simple.setToolTip("Settings")
+        self._gear_btn_simple.clicked.connect(self._open_settings)
         # Position it in bottom-right — we'll update in resizeEvent
         self._gear_btn_simple.setParent(self._simple_container)
         self._gear_btn_simple.raise_()
@@ -343,6 +343,15 @@ class MainWindow(QMainWindow):
         else:
             self._mode_stack.setCurrentWidget(self._simple_container)
             self.simple_page._refresh_models()
+        self._position_gear_buttons()
+
+    def _open_settings(self):
+        """Switch to expert mode and show the Settings page."""
+        self._is_expert = True
+        self._mode_stack.setCurrentWidget(self._expert_container)
+        # Settings is at sidebar index 5
+        self.sidebar.setCurrentRow(5)
+        self.stack.setCurrentWidget(self.settings_page)
         self._position_gear_buttons()
 
     def _position_gear_buttons(self):
