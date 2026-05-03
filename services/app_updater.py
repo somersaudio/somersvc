@@ -88,72 +88,139 @@ def check_for_update() -> dict | None:
 
 
 def download_and_install(asset_url: str, on_progress=None) -> bool:
-    """Download the .dmg, mount it, replace SomerSVC.app in /Applications.
+    """Download the .dmg, stage the new .app, schedule a deferred installer.
 
-    Returns True on success. Caller should QApplication.quit() afterward.
+    The actual /Applications replacement runs in a detached shell script
+    AFTER this process exits — that's the only reliable way to replace a
+    running .app on macOS. Caller MUST call QApplication.quit() right after
+    this returns True so the installer can take over.
     """
     log = on_progress or (lambda _msg: None)
     try:
-        with tempfile.TemporaryDirectory() as tmp:
-            dmg_path = Path(tmp) / "SomerSVC-update.dmg"
+        # Use a stable temp dir so the installer script can find what we staged.
+        # We don't use TemporaryDirectory here because that would auto-delete
+        # before the deferred installer runs.
+        staging = Path(tempfile.gettempdir()) / "somersvc_update"
+        if staging.exists():
+            subprocess.run(["rm", "-rf", str(staging)], check=False)
+        staging.mkdir(parents=True, exist_ok=True)
 
-            # Download
-            log("Downloading update...")
-            with requests.get(asset_url, stream=True, timeout=60) as r:
-                r.raise_for_status()
-                total = int(r.headers.get("Content-Length", 0))
-                downloaded = 0
-                with open(dmg_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total and on_progress:
-                            pct = int(downloaded / total * 100)
-                            log(f"Downloading update... {pct}%")
+        dmg_path = staging / "SomerSVC-update.dmg"
 
-            # Mount
-            log("Mounting update image...")
-            mount_proc = subprocess.run(
-                ["hdiutil", "attach", str(dmg_path), "-nobrowse", "-quiet"],
-                capture_output=True, text=True, check=True,
+        # --- Download ---
+        log("Downloading update...")
+        with requests.get(asset_url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length", 0))
+            downloaded = 0
+            with open(dmg_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        pct = int(downloaded / total * 100)
+                        log(f"Downloading update... {pct}%")
+
+        # --- Mount (without -quiet so we can parse the mount point) ---
+        log("Mounting update image...")
+        mount_proc = subprocess.run(
+            ["hdiutil", "attach", str(dmg_path), "-nobrowse", "-noverify",
+             "-noautoopen", "-plist"],
+            capture_output=True, text=True, check=True,
+        )
+        # Parse the plist output for the mount-point
+        mount_point = None
+        m = re.search(r"<key>mount-point</key>\s*<string>([^<]+)</string>",
+                      mount_proc.stdout)
+        if m:
+            mount_point = m.group(1).strip()
+        if not mount_point:
+            # Fallback: look for /Volumes/<anything> in the output
+            m = re.search(r"(/Volumes/[^<\s]+)", mount_proc.stdout)
+            if m:
+                mount_point = m.group(1).strip()
+        if not mount_point:
+            raise RuntimeError(
+                f"Could not find mount point. hdiutil output:\n"
+                f"{mount_proc.stdout[:400]}"
             )
-            mount_point = None
-            for line in mount_proc.stdout.splitlines():
-                if "/Volumes/" in line:
-                    mount_point = line.split("\t")[-1].strip()
-                    break
-            if not mount_point:
-                raise RuntimeError("Could not find mount point for update DMG")
 
-            try:
-                src_app = Path(mount_point) / APP_NAME
-                if not src_app.exists():
-                    raise RuntimeError(f"Update DMG missing {APP_NAME}")
+        try:
+            src_app = Path(mount_point) / APP_NAME
+            if not src_app.exists():
+                raise RuntimeError(f"Update DMG missing {APP_NAME}")
 
-                dest_app = Path("/Applications") / APP_NAME
+            # --- Stage the new .app at a known temp path ---
+            log("Preparing update...")
+            staged_app = staging / APP_NAME
+            if staged_app.exists():
+                subprocess.run(["rm", "-rf", str(staged_app)], check=False)
+            subprocess.run(
+                ["cp", "-R", str(src_app), str(staged_app)],
+                check=True,
+            )
+            # Strip quarantine on the staged copy so the launched .app
+            # doesn't trigger Gatekeeper.
+            subprocess.run(
+                ["xattr", "-d", "-r", "com.apple.quarantine", str(staged_app)],
+                capture_output=True,
+            )
+        finally:
+            # Detach the DMG; ignore failures.
+            subprocess.run(
+                ["hdiutil", "detach", mount_point, "-force"],
+                capture_output=True,
+            )
 
-                # Remove old, copy new
-                log("Replacing SomerSVC.app in /Applications...")
-                if dest_app.exists():
-                    subprocess.run(["rm", "-rf", str(dest_app)], check=True)
-                subprocess.run(
-                    ["cp", "-R", str(src_app), str(dest_app)],
-                    check=True,
-                )
-                # Strip quarantine so it launches without Gatekeeper prompt
-                subprocess.run(
-                    ["xattr", "-d", "-r", "com.apple.quarantine", str(dest_app)],
-                    capture_output=True,
-                )
-                log("Update installed!")
-                return True
-            finally:
-                subprocess.run(
-                    ["hdiutil", "detach", mount_point, "-quiet"],
-                    capture_output=True,
-                )
+        # --- Write a deferred installer that runs after we quit ---
+        log("Scheduling install...")
+        installer_path = staging / "install.sh"
+        log_path = staging / "install.log"
+        # Wait for the running SomerSVC process to exit, then do the swap.
+        # Detect the running app by ppid (this script's parent) or pgrep.
+        installer_path.write_text(f"""#!/bin/bash
+exec >"{log_path}" 2>&1
+echo "[$(date)] installer starting"
+# Wait until the launching SomerSVC.app process is gone (max 30s)
+for i in $(seq 1 60); do
+    if ! pgrep -f "SomerSVC.app/Contents/MacOS/SomerSVC" > /dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+sleep 1  # extra safety so file handles are released
+DEST="/Applications/{APP_NAME}"
+SRC="{staged_app}"
+echo "[$(date)] removing $DEST"
+rm -rf "$DEST"
+echo "[$(date)] copying $SRC -> $DEST"
+if cp -R "$SRC" "$DEST"; then
+    echo "[$(date)] copy ok"
+    xattr -d -r com.apple.quarantine "$DEST" 2>/dev/null || true
+    echo "[$(date)] launching"
+    open -a "$DEST"
+else
+    echo "[$(date)] copy failed (need admin?)"
+    osascript -e 'display alert "Update failed" message "SomerSVC could not write to /Applications. Please drag the new SomerSVC.app from {staging} into /Applications manually."'
+fi
+echo "[$(date)] done"
+""")
+        installer_path.chmod(0o755)
+
+        # Spawn the installer fully detached (nohup + &). It runs in the
+        # background and survives our exit.
+        subprocess.Popen(
+            ["/bin/bash", "-c", f"nohup {installer_path} >/dev/null 2>&1 &"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        log("Update ready! Restarting...")
+        return True
     except Exception as e:
         log(f"Update failed: {e}")
         return False

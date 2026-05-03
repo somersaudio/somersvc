@@ -144,21 +144,23 @@ def _run_update_with_progress(parent_window, asset_url: str):
 
     class _Worker(QThread):
         progress = pyqtSignal(int, str)   # percent (0-100, -1=unknown), status text
-        done = pyqtSignal(bool)
+        done = pyqtSignal(bool, str)      # success, last status / error message
 
         def __init__(self, url):
             super().__init__()
             self.url = url
+            self._last_msg = ""
 
         def run(self):
             def on_msg(text: str):
+                self._last_msg = text
                 m = re.search(r"(\d+)%", text)
                 if m:
                     self.progress.emit(int(m.group(1)), text)
                 else:
                     self.progress.emit(-1, text)
             ok = download_and_install(self.url, on_progress=on_msg)
-            self.done.emit(ok)
+            self.done.emit(ok, self._last_msg)
 
     dlg = QDialog(parent_window)
     dlg.setWindowTitle("Installing Update")
@@ -198,19 +200,24 @@ def _run_update_with_progress(parent_window, asset_url: str):
         lbl_status.setText(text)
         QApplication.processEvents()
 
-    def _on_done(ok: bool):
+    def _on_done(ok: bool, last_msg: str):
         if ok:
             bar.setRange(0, 100)
             bar.setValue(100)
-            lbl_status.setText("Update installed! Restarting...")
+            lbl_status.setText("Update ready! Restarting to install...")
             QApplication.processEvents()
-            QProcess.startDetached("/usr/bin/open", ["-a", "/Applications/SomerSVC.app"])
+            # Don't relaunch from here — the deferred installer in
+            # /tmp/somersvc_update/install.sh will replace the .app and
+            # call `open` on the new one once we exit.
             QApplication.quit()
         else:
             dlg.reject()
+            detail = last_msg or "Unknown error."
             QMessageBox.warning(
                 parent_window, "Update Failed",
-                "The update could not be installed. You can try again later from the app.",
+                f"The update could not be installed.\n\n{detail}\n\n"
+                f"You can try again later from the app, or download "
+                f"manually from github.com/somersaudio/somersvc-releases.",
             )
 
     worker.progress.connect(_on_progress)
