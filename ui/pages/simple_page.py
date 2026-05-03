@@ -1410,6 +1410,10 @@ class _CreateModelPanel(QWidget):
         # File list showing existing clips
         self._file_list = QListWidget()
         self._file_list.setFixedHeight(200)
+        # Allow shift-click / cmd-click / Cmd+A multi-select for bulk actions
+        self._file_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection
+        )
         self._file_list.setStyleSheet("""
             QListWidget {
                 background: rgba(255, 255, 255, 3);
@@ -2025,30 +2029,21 @@ class _CreateModelPanel(QWidget):
         # Unreadable — just byte-copy and let the pod sort it out
         shutil.copy2(src, dst)
 
-    def _split_selected_clip(self):
-        """Split selected clip into ~7 second chunks. Only splits if > 10 seconds."""
-        row = self._file_list.currentRow()
-        if row < 0 or row >= len(self._clips):
-            return
-        path = self._clips[row]
+    def _split_clip_at_path(self, path: str) -> list:
+        """Split one clip into ~7-second chunks; returns the new paths or [] on skip."""
         if not os.path.exists(path):
-            return
-
+            return []
         import soundfile as _sf
         try:
             info = _sf.info(path)
             duration = info.duration
         except Exception:
-            return
-
+            return []
         if duration <= 10.0:
-            self._lbl_clips.setText("Clip is too short to split (needs > 10s)")
-            return
+            return []  # too short — skip
 
-        # Split into ~7 second chunks
         chunk_sec = 7.0
         audio, sr = _sf.read(path)
-        # Mix stereo down to mono so split chunks don't carry an unused channel
         if getattr(audio, "ndim", 1) > 1 and audio.shape[1] > 1:
             audio = audio.mean(axis=1).astype(audio.dtype, copy=False)
         parent_dir = os.path.dirname(path)
@@ -2057,11 +2052,9 @@ class _CreateModelPanel(QWidget):
         chunk_idx = 1
         pos = 0
         total_samples = len(audio)
-
         while pos < total_samples:
             end = min(pos + int(chunk_sec * sr), total_samples)
             remaining = total_samples - end
-            # If remainder would be < 3 seconds, merge it into this chunk
             if remaining > 0 and remaining < int(3.0 * sr):
                 end = total_samples
             chunk = audio[pos:end]
@@ -2070,19 +2063,69 @@ class _CreateModelPanel(QWidget):
             new_paths.append(chunk_path)
             chunk_idx += 1
             pos = end
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return new_paths
 
-        # Replace original with splits
-        self._clips.pop(row)
-        os.remove(path)
-        for i, p in enumerate(new_paths):
-            self._clips.insert(row + i, p)
+    def _selected_clip_rows(self) -> list:
+        """Indices of currently-selected rows in self._clips, sorted ascending."""
+        rows = sorted({
+            self._file_list.row(it)
+            for it in self._file_list.selectedItems()
+        })
+        return [r for r in rows if 0 <= r < len(self._clips)]
+
+    def _split_selected_clip(self):
+        """Split each selected clip into ~7s chunks (clips ≤ 10s are skipped)."""
+        rows = self._selected_clip_rows()
+        if not rows:
+            row = self._file_list.currentRow()
+            if 0 <= row < len(self._clips):
+                rows = [row]
+        if not rows:
+            return
+
+        # Snapshot paths before mutating self._clips so indices stay sane
+        targets = [self._clips[r] for r in rows]
+        split_count = 0
+        skipped_short = 0
+        for path in targets:
+            try:
+                idx = self._clips.index(path)
+            except ValueError:
+                continue
+            new_paths = self._split_clip_at_path(path)
+            if not new_paths:
+                skipped_short += 1
+                continue
+            self._clips.pop(idx)
+            for j, p in enumerate(new_paths):
+                self._clips.insert(idx + j, p)
+            split_count += 1
         self._refresh_file_list()
+        if skipped_short and split_count == 0:
+            self._lbl_clips.setText("Selected clips are too short to split (need > 10s)")
+        elif skipped_short:
+            self._lbl_clips.setText(
+                f"Split {split_count} clip(s); skipped {skipped_short} under 10 seconds"
+            )
 
     def _remove_selected_clip(self):
-        row = self._file_list.currentRow()
-        if row >= 0 and row < len(self._clips):
-            self._clips.pop(row)
-            self._refresh_file_list()
+        """Remove every selected clip (or the active row if nothing's selected)."""
+        rows = self._selected_clip_rows()
+        if not rows:
+            row = self._file_list.currentRow()
+            if 0 <= row < len(self._clips):
+                rows = [row]
+        if not rows:
+            return
+        # Pop in reverse so earlier indices stay valid
+        for r in sorted(rows, reverse=True):
+            if 0 <= r < len(self._clips):
+                self._clips.pop(r)
+        self._refresh_file_list()
 
     def _ask_export_options(self, name: str, dataset_files: list, dataset_dur: float):
         """Show a small dialog asking whether to bundle training data.
