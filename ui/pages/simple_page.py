@@ -3057,8 +3057,11 @@ class _CreateModelPanel(QWidget):
             if m:
                 epoch = int(m.group(1))
         # Checkpoint filename fallback: G_100.pth or D_100.pth
-        if epoch is None:
-            m = re.search(r'[GD]_(\d+)\.pth', line)
+        # Word-boundary-anchored so we don't match URLs like "clean_G_320000.pth"
+        # in the pretrained-model warning. Also require the line to look like a
+        # save event so we never chew on the bare URL.
+        if epoch is None and re.search(r'\b(saving|writing|to)\b', line, re.IGNORECASE):
+            m = re.search(r'\b[GD]_(\d+)\.pth\b', line)
             if m:
                 epoch = int(m.group(1))
 
