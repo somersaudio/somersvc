@@ -2576,18 +2576,33 @@ class _CreateModelPanel(QWidget):
     def _on_train_log(self, line):
         self._log.append_line(line)
         import re
-        match = re.search(r'Epoch (\d+)/(\d+)', line)
-        if match:
-            self._current_epoch = int(match.group(1))
+        epoch = None
+        # Live progress line: "Epoch 37/9999"
+        m = re.search(r'Epoch (\d+)/(\d+)', line)
+        if m:
+            epoch = int(m.group(1))
+        # Checkpoint save: "Saving ... at epoch 100 to /workspace/.../G_100.pth"
+        if epoch is None:
+            m = re.search(r'(?:saving|state at).*?epoch\s+(\d+)', line, re.IGNORECASE)
+            if m:
+                epoch = int(m.group(1))
+        # Checkpoint filename fallback: G_100.pth or D_100.pth
+        if epoch is None:
+            m = re.search(r'[GD]_(\d+)\.pth', line)
+            if m:
+                epoch = int(m.group(1))
+
+        if epoch is not None and epoch > 0:
+            self._current_epoch = epoch
             rec = self._recommended_epochs
-            if rec > 0 and self._current_epoch > 0:
+            if rec > 0:
                 pct = min(int((self._current_epoch / rec) * 100), 100)
                 self._progress_bar.setValue(pct)
                 self._lbl_epoch.setText(f"{self._current_epoch}/{rec}")
                 self._lbl_epoch.setVisible(True)
                 self._lbl_status.setText(f"Training... Epoch {self._current_epoch}/{rec}")
             # Auto-stop at target
-            if self._current_epoch >= rec:
+            if rec > 0 and self._current_epoch >= rec:
                 if self._worker and self._worker.isRunning():
                     self._log.append_line(f"Reached target of {rec} epochs — stopping & downloading model...")
                     self._worker.request_stop()
