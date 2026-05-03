@@ -1820,7 +1820,7 @@ class _CreateModelPanel(QWidget):
             self._refresh_file_list()
 
     def _export_model_file(self):
-        """Export the currently-selected model as a .svc zip."""
+        """Export the currently-selected model as a .svc zip with a progress dialog."""
         name = self._selected_name.strip()
         if not name:
             QMessageBox.information(
@@ -1832,7 +1832,6 @@ class _CreateModelPanel(QWidget):
         if not os.path.isdir(model_dir):
             QMessageBox.warning(self, "No Model", f"No trained model found for \"{name}\".")
             return
-        # Must contain at least one .pth checkpoint
         if not any(f.endswith(".pth") for f in os.listdir(model_dir)):
             QMessageBox.warning(self, "No Model", f"\"{name}\" has no checkpoint to export yet.")
             return
@@ -1844,18 +1843,109 @@ class _CreateModelPanel(QWidget):
         )
         if not save_path:
             return
-        import zipfile
-        try:
-            with zipfile.ZipFile(save_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for root, _dirs, files in os.walk(model_dir):
-                    for f in files:
-                        full = os.path.join(root, f)
-                        arcname = os.path.join(name, os.path.relpath(full, model_dir))
-                        zf.write(full, arcname)
-        except Exception as e:
-            QMessageBox.warning(self, "Export Failed", str(e))
-            return
-        QMessageBox.information(self, "Exported", f"Model exported to:\n{save_path}")
+
+        from PyQt6.QtCore import Qt, QThread, pyqtSignal
+        from PyQt6.QtWidgets import (
+            QApplication, QDialog, QLabel, QProgressBar, QVBoxLayout,
+        )
+
+        class _ExportWorker(QThread):
+            progress = pyqtSignal(int, str)   # percent, status text
+            done = pyqtSignal(bool, str)      # ok, error_or_empty
+
+            def __init__(self, model_dir, save_path, name):
+                super().__init__()
+                self.model_dir = model_dir
+                self.save_path = save_path
+                self.name = name
+
+            def run(self):
+                import os, zipfile
+                try:
+                    # Gather files + total size first so we can report bytes-based progress
+                    file_list = []
+                    total_bytes = 0
+                    for root, _dirs, files in os.walk(self.model_dir):
+                        for f in files:
+                            full = os.path.join(root, f)
+                            arcname = os.path.join(
+                                self.name, os.path.relpath(full, self.model_dir)
+                            )
+                            try:
+                                size = os.path.getsize(full)
+                            except OSError:
+                                size = 0
+                            file_list.append((full, arcname, size))
+                            total_bytes += size
+                    if total_bytes <= 0:
+                        total_bytes = 1  # avoid zero-division
+
+                    written = 0
+                    chunk_size = 1024 * 1024  # 1 MB
+                    self.progress.emit(0, f"Compressing {len(file_list)} files...")
+
+                    with zipfile.ZipFile(
+                        self.save_path, "w", zipfile.ZIP_DEFLATED
+                    ) as zf:
+                        for idx, (full, arcname, size) in enumerate(file_list, 1):
+                            # Stream large files chunk-by-chunk so the bar updates
+                            # mid-file (single .pth files can be 500MB+).
+                            with open(full, "rb") as src:
+                                with zf.open(arcname, "w", force_zip64=True) as dst:
+                                    while True:
+                                        buf = src.read(chunk_size)
+                                        if not buf:
+                                            break
+                                        dst.write(buf)
+                                        written += len(buf)
+                                        pct = min(int(written / total_bytes * 100), 100)
+                                        self.progress.emit(
+                                            pct,
+                                            f"Compressing {os.path.basename(full)} "
+                                            f"({idx}/{len(file_list)})... {pct}%"
+                                        )
+                    self.progress.emit(100, "Finalizing...")
+                    self.done.emit(True, "")
+                except Exception as e:
+                    self.done.emit(False, str(e))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Exporting Model")
+        dlg.setModal(True)
+        dlg.setFixedSize(440, 130)
+        dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(20, 20, 20, 20)
+        v.setSpacing(10)
+        lbl = QLabel("Preparing export...")
+        lbl.setStyleSheet("color: #ddd; font-size: 13px;")
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        v.addWidget(bar)
+        hint = QLabel("Compression takes ~10–30s for typical models.")
+        hint.setStyleSheet("color: rgba(255,255,255,80); font-size: 11px;")
+        v.addWidget(hint)
+
+        worker = _ExportWorker(model_dir, save_path, name)
+
+        def _on_progress(pct: int, text: str):
+            bar.setValue(pct)
+            lbl.setText(text)
+            QApplication.processEvents()
+
+        def _on_done(ok: bool, err: str):
+            dlg.accept()
+            if ok:
+                QMessageBox.information(self, "Exported", f"Model exported to:\n{save_path}")
+            else:
+                QMessageBox.warning(self, "Export Failed", err or "Unknown error.")
+
+        worker.progress.connect(_on_progress)
+        worker.done.connect(_on_done)
+        worker.start()
+        dlg.exec()
 
     def _import_model_file(self):
         """Import a .svc / .pth / .zip model from disk into the user's models dir."""
