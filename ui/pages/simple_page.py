@@ -1328,10 +1328,24 @@ class _CreateModelPanel(QWidget):
         title.setStyleSheet("color: #ddd; font-size: 18px; font-weight: bold; background: transparent;")
         header.addWidget(title)
         header.addStretch()
-        # Spacer to balance the back button
-        spacer = QLabel("")
-        spacer.setFixedWidth(40)
-        header.addWidget(spacer)
+        # Import + Export icon buttons (top-right)
+        icon_style = (
+            "QLabel { color: rgba(255,255,255,55); font-size: 18px; "
+            "background: transparent; padding: 2px 6px; }"
+            "QLabel:hover { color: rgba(255,255,255,180); }"
+        )
+        self._btn_import_model = QLabel("⤓")
+        self._btn_import_model.setStyleSheet(icon_style)
+        self._btn_import_model.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_import_model.setToolTip("Import a .svc / .pth model from your computer")
+        self._btn_import_model.mousePressEvent = lambda e: self._import_model_file()
+        header.addWidget(self._btn_import_model)
+        self._btn_export_model = QLabel("⤒")
+        self._btn_export_model.setStyleSheet(icon_style)
+        self._btn_export_model.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_export_model.setToolTip("Export the selected model as a .svc file")
+        self._btn_export_model.mousePressEvent = lambda e: self._export_model_file()
+        header.addWidget(self._btn_export_model)
         layout.addLayout(header)
 
         subtitle = QLabel("Name your voice, add audio clips, and train on a cloud GPU")
@@ -1804,6 +1818,119 @@ class _CreateModelPanel(QWidget):
         if row >= 0 and row < len(self._clips):
             self._clips.pop(row)
             self._refresh_file_list()
+
+    def _export_model_file(self):
+        """Export the currently-selected model as a .svc zip."""
+        name = self._selected_name.strip()
+        if not name:
+            QMessageBox.information(
+                self, "Pick a Model", "Select a trained model first to export it."
+            )
+            return
+        from services.paths import MODELS_DIR
+        model_dir = os.path.join(str(MODELS_DIR), name)
+        if not os.path.isdir(model_dir):
+            QMessageBox.warning(self, "No Model", f"No trained model found for \"{name}\".")
+            return
+        # Must contain at least one .pth checkpoint
+        if not any(f.endswith(".pth") for f in os.listdir(model_dir)):
+            QMessageBox.warning(self, "No Model", f"\"{name}\" has no checkpoint to export yet.")
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Model",
+            os.path.expanduser(f"~/Desktop/{name}.svc"),
+            "SomerSVC Model (*.svc);;All Files (*)",
+        )
+        if not save_path:
+            return
+        import zipfile
+        try:
+            with zipfile.ZipFile(save_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, _dirs, files in os.walk(model_dir):
+                    for f in files:
+                        full = os.path.join(root, f)
+                        arcname = os.path.join(name, os.path.relpath(full, model_dir))
+                        zf.write(full, arcname)
+        except Exception as e:
+            QMessageBox.warning(self, "Export Failed", str(e))
+            return
+        QMessageBox.information(self, "Exported", f"Model exported to:\n{save_path}")
+
+    def _import_model_file(self):
+        """Import a .svc / .pth / .zip model from disk into the user's models dir."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Model", "",
+            "All Models (*.svc *.pth *.zip);;SomerSVC Model (*.svc);;"
+            "RVC Model (*.pth);;Zip Files (*.zip);;All Files (*)",
+        )
+        if not path:
+            return
+
+        from services.paths import MODELS_DIR
+        models_root = str(MODELS_DIR)
+        os.makedirs(models_root, exist_ok=True)
+        import shutil
+        import zipfile
+
+        try:
+            # Loose .pth (RVC-style) - ask for a name, drop in its own folder
+            if path.lower().endswith(".pth"):
+                from PyQt6.QtWidgets import QInputDialog
+                stem = os.path.splitext(os.path.basename(path))[0]
+                for suffix in ("_v2", "_v1", "-v2", "-v1"):
+                    if stem.endswith(suffix):
+                        stem = stem[: -len(suffix)]
+                        break
+                name, ok = QInputDialog.getText(
+                    self, "Model Name", "Name for this model:", text=stem
+                )
+                if not ok or not name.strip():
+                    return
+                name = name.strip()
+                dest = os.path.join(models_root, name)
+                os.makedirs(dest, exist_ok=True)
+                shutil.copy2(path, os.path.join(dest, os.path.basename(path)))
+                # If a .index file lives next to it, bring that along too
+                pth_dir = os.path.dirname(path)
+                for f in os.listdir(pth_dir):
+                    if f.endswith(".index"):
+                        shutil.copy2(os.path.join(pth_dir, f), os.path.join(dest, f))
+            else:
+                # .svc or .zip - extract preserving the top-level folder name
+                with zipfile.ZipFile(path, "r") as zf:
+                    names = zf.namelist()
+                    if not names:
+                        QMessageBox.warning(self, "Invalid", "The file is empty.")
+                        return
+                    top = names[0].split("/")[0]
+                    has_pth = any(n.endswith(".pth") for n in names)
+                    if not has_pth:
+                        QMessageBox.warning(
+                            self, "Invalid",
+                            "No model checkpoint (.pth) found in this file."
+                        )
+                        return
+                    dest = os.path.join(models_root, top)
+                    if os.path.exists(dest):
+                        reply = QMessageBox.question(
+                            self, "Overwrite?",
+                            f"A model named \"{top}\" already exists. Replace it?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        )
+                        if reply != QMessageBox.StandardButton.Yes:
+                            return
+                        shutil.rmtree(dest, ignore_errors=True)
+                    zf.extractall(models_root)
+                    name = top
+        except Exception as e:
+            QMessageBox.warning(self, "Import Failed", str(e))
+            return
+
+        # Refresh and select the new model
+        self._populate_existing_datasets()
+        self._select_model(name)
+        QMessageBox.information(self, "Imported", f"Model \"{name}\" imported.")
 
     def _delete_model(self):
         """Delete the trained model files (the dataset stays put)."""
