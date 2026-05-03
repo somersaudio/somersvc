@@ -35,12 +35,7 @@ def estimate_artist_key(artist_name: str) -> tuple[str, float]:
 
     Returns (note_name, hz) or ("", 0) on failure.
     """
-    config = load_config()
-    songbpm_key = config.get(
-        "songbpm_api_key", os.environ.get("SOMERSVC_SONGBPM_KEY", "")
-    )
-    if not songbpm_key:
-        return "", 0
+    songbpm_key = "699134c773af1fae8b9e99477dbef377"
 
     # Get track names from Spotify search (no restricted endpoints needed)
     track_names = _get_track_names_spotify(artist_name)
