@@ -1626,12 +1626,24 @@ class _CreateModelPanel(QWidget):
         self._btn_split_clip.mousePressEvent = lambda e: self._split_selected_clip()
         action_row.addWidget(self._btn_split_clip)
 
-        # Hide isolate / remove / split (and the dots that separate them)
-        # until the user actually selects a clip.
+        dot_norm = QLabel(" · ")
+        dot_norm.setStyleSheet("color: rgba(255, 255, 255, 30); font-size: 10px; background: transparent;")
+        action_row.addWidget(dot_norm)
+
+        self._btn_normalize_clip = QLabel("Normalize")
+        self._btn_normalize_clip.setStyleSheet("color: rgba(94, 200, 180, 80); font-size: 10px; background: transparent;")
+        self._btn_normalize_clip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_normalize_clip.setToolTip("Bring the selected clips' RMS loudness to -12 dBFS (peak-safe)")
+        self._btn_normalize_clip.mousePressEvent = lambda e: self._normalize_selected_clips()
+        action_row.addWidget(self._btn_normalize_clip)
+
+        # Hide isolate / remove / split / normalize (and the dots that
+        # separate them) until the user actually selects a clip.
         self._selection_only_widgets = [
             dot1, self._btn_isolate,
             dot2, self._btn_remove_clip,
             dot3, self._btn_split_clip,
+            dot_norm, self._btn_normalize_clip,
         ]
         for w in self._selection_only_widgets:
             w.setVisible(False)
@@ -2280,6 +2292,106 @@ class _CreateModelPanel(QWidget):
             self._lbl_clips.setText(
                 f"Split {split_count} clip(s); skipped {skipped_short} under 10 seconds"
             )
+
+    def _normalize_selected_clips(self):
+        """Bring each selected clip's RMS to -12 dBFS, peak-safe (no clipping)."""
+        rows = self._selected_clip_rows()
+        if not rows:
+            row = self._file_list.currentRow()
+            if 0 <= row < len(self._clips):
+                rows = [row]
+        if not rows:
+            return
+        targets = [self._clips[r] for r in rows]
+
+        TARGET_DBFS = -12.0
+        target_amp = 10 ** (TARGET_DBFS / 20.0)  # ~0.2512
+
+        from PyQt6.QtCore import QThread, pyqtSignal
+        normalize_one = self._normalize_clip_to_dbfs
+
+        class _NormWorker(QThread):
+            progress = pyqtSignal(int, int, str)  # done, total, current
+            done = pyqtSignal(int, int)            # done_count, skipped_count
+
+            def __init__(self, paths, target_amp):
+                super().__init__()
+                self.paths = paths
+                self.target_amp = target_amp
+
+            def run(self):
+                ok = 0
+                skipped = 0
+                total = len(self.paths)
+                for i, p in enumerate(self.paths, 1):
+                    self.progress.emit(i - 1, total, os.path.basename(p))
+                    if normalize_one(p, self.target_amp):
+                        ok += 1
+                    else:
+                        skipped += 1
+                self.progress.emit(total, total, "")
+                self.done.emit(ok, skipped)
+
+        self._lbl_status.setText(f"Normalizing {len(targets)} clip(s) to -12 dBFS...")
+        self._lbl_status.setStyleSheet(
+            "color: rgba(255, 255, 255, 75); font-size: 11px; background: transparent;"
+        )
+        self._norm_worker = _NormWorker(targets, target_amp)
+
+        def _on_progress(done: int, total: int, current: str):
+            if current:
+                self._lbl_status.setText(f"Normalizing {done + 1}/{total}: {current}")
+
+        def _on_done(ok: int, skipped: int):
+            msg = f"Normalized {ok} clip{'s' if ok != 1 else ''} to -12 dBFS"
+            if skipped:
+                msg += f" · skipped {skipped} (silent or unreadable)"
+            self._lbl_status.setText(msg)
+            self._lbl_status.setStyleSheet(
+                "color: rgba(80, 200, 120, 150); font-size: 11px; background: transparent;"
+            )
+            # Auto-clear after a few seconds
+            QTimer.singleShot(8000, lambda: self._lbl_status.setText("")
+                              if self._lbl_status.text() == msg else None)
+            # Refresh waveform preview if a normalized clip is the active selection
+            self._refresh_file_list()
+
+        self._norm_worker.progress.connect(_on_progress)
+        self._norm_worker.done.connect(_on_done)
+        self._norm_worker.start()
+
+    def _normalize_clip_to_dbfs(self, path: str, target_amp: float) -> bool:
+        """Scale audio in `path` so its RMS == target_amp, but cap so the peak
+        doesn't exceed 0.99 (avoids clipping).
+
+        Returns True if rewritten, False if skipped (silent / unreadable).
+        """
+        try:
+            import soundfile as _sf
+            import numpy as _np
+            audio, sr = _sf.read(path, always_2d=False, dtype="float32")
+            if audio.size == 0:
+                return False
+            # Compute RMS over the flattened buffer
+            flat = audio if audio.ndim == 1 else audio.mean(axis=1)
+            rms = float(_np.sqrt(_np.mean(flat ** 2)))
+            if rms < 1e-6:
+                return False  # silent
+            gain = target_amp / rms
+            # Peak-safety: don't let the loudest sample exceed 0.99
+            peak = float(_np.max(_np.abs(audio)))
+            if peak * gain > 0.99:
+                gain = 0.99 / max(peak, 1e-6)
+            audio = (audio * gain).astype(_np.float32, copy=False)
+            info = _sf.info(path)
+            subtype = info.subtype if info.subtype else "FLOAT"
+            # If we'd overflow a fixed-point format, fall back to float
+            if subtype.startswith("PCM_") and float(_np.max(_np.abs(audio))) > 0.999:
+                subtype = "FLOAT"
+            _sf.write(path, audio, sr, subtype=subtype)
+            return True
+        except Exception:
+            return False
 
     def _remove_selected_clip(self):
         """Remove every selected clip (or the active row if nothing's selected)."""
