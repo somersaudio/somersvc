@@ -5688,10 +5688,20 @@ class SimplePage(QWidget):
 
         model_path = os.path.join(model_dir, g_files[-1])
         config_path = os.path.join(model_dir, "config.json")
-        svc_bin = os.path.join(os.path.dirname(sys.executable), "svc")
 
-        cmd = [
-            svc_bin, "vc",
+        # Resolve the svc invocation in both dev (venv with bin/svc) and
+        # bundled-app modes. In the .app there's no separate svc binary, so
+        # we re-exec ourselves with --svc-mode and main.py hands off to
+        # so-vits-svc-fork's CLI. (Same pattern as services.inference_runner
+        # and ui.pages.realtime_page.)
+        dev_bin = os.path.join(os.path.dirname(sys.executable), "svc")
+        if os.path.exists(dev_bin):
+            cmd_prefix = [dev_bin]
+        else:
+            cmd_prefix = [sys.executable, "--svc-mode"]
+
+        cmd = cmd_prefix + [
+            "vc",
             "-m", model_path,
             "-c", config_path,
             "-s", "0",
