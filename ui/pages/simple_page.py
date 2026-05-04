@@ -2915,10 +2915,14 @@ class _CreateModelPanel(QWidget):
                 None,
             )
             if existing is None:
+                # Use the same Best-Match wallpaper as the placeholder image
+                # so the carousel card matches the panel background.
+                best_bg = os.path.join(APP_DIR, "assets", "best_match.png")
+                placeholder = QPixmap(best_bg) if os.path.exists(best_bg) else None
                 models = list(self._carousel._models) + [{
                     "name": name,
                     "dir": "",
-                    "pixmap": None,
+                    "pixmap": placeholder,
                     "vocal_key": "",
                     "pending": True,
                 }]
@@ -3113,13 +3117,21 @@ class _CreateModelPanel(QWidget):
             has_checkpoint = os.path.isdir(artist_dir) and any(
                 f.endswith(".pth") for f in os.listdir(artist_dir)
             )
+            pending = not has_checkpoint
+
+            # Pending entries without their own image fall back to the
+            # Best-Match wallpaper so the carousel matches the background.
+            if pending and pixmap is None:
+                best_bg = os.path.join(APP_DIR, "assets", "best_match.png")
+                if os.path.exists(best_bg):
+                    pixmap = QPixmap(best_bg)
 
             models.append({
                 "name": name,
                 "dir": artist_dir,
                 "pixmap": pixmap,
                 "vocal_key": vocal_key,
-                "pending": not has_checkpoint,
+                "pending": pending,
             })
 
         self._carousel.set_models(models)
