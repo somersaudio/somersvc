@@ -884,6 +884,36 @@ class _ModelCarousel(QWidget):
         else:
             super().keyPressEvent(event)
 
+    def event(self, event):
+        # Show a contextual tooltip when hovering the "?"/key badge
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtWidgets import QToolTip
+        if event.type() == QEvent.Type.ToolTip:
+            if self._badge_rect and self._badge_rect.contains(event.pos()):
+                if 0 <= self._selected < len(self._models):
+                    model = self._models[self._selected]
+                    key = (model.get("vocal_key") or "").strip()
+                    if not key or key == "Auto":
+                        QToolTip.showText(
+                            event.globalPos(),
+                            "Vocal key not detected yet.\n\n"
+                            "It populates after training. The trainer scans the\n"
+                            "artist's audio to find their median pitch, which the\n"
+                            "app then uses to recommend transposes that keep\n"
+                            "your songs in the artist's natural range.",
+                            self,
+                        )
+                    else:
+                        QToolTip.showText(
+                            event.globalPos(),
+                            f"Detected vocal key: {key}\n"
+                            "Click to manually adjust if it sounds off.",
+                            self,
+                        )
+                    return True
+            QToolTip.hideText()
+        return super().event(event)
+
     def mousePressEvent(self, event):
         if not self._models:
             return
