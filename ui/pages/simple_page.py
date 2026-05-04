@@ -1498,7 +1498,7 @@ class _CreateModelPanel(QWidget):
         dot1.setStyleSheet("color: rgba(255, 255, 255, 30); font-size: 10px; background: transparent;")
         action_row.addWidget(dot1)
 
-        self._btn_isolate = QLabel("Isolate vocals from songs")
+        self._btn_isolate = QLabel("Isolate selected vocals")
         self._btn_isolate.setStyleSheet("color: rgba(94, 200, 180, 80); font-size: 10px; background: transparent;")
         self._btn_isolate.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_isolate.mousePressEvent = lambda e: self._isolate_vocals()
@@ -1524,6 +1524,16 @@ class _CreateModelPanel(QWidget):
         self._btn_split_clip.mousePressEvent = lambda e: self._split_selected_clip()
         action_row.addWidget(self._btn_split_clip)
 
+        # Hide isolate / remove / split (and the dots that separate them)
+        # until the user actually selects a clip.
+        self._selection_only_widgets = [
+            dot1, self._btn_isolate,
+            dot2, self._btn_remove_clip,
+            dot3, self._btn_split_clip,
+        ]
+        for w in self._selection_only_widgets:
+            w.setVisible(False)
+
         dot4 = QLabel(" · ")
         dot4.setStyleSheet("color: rgba(255, 255, 255, 30); font-size: 10px; background: transparent;")
         action_row.addWidget(dot4)
@@ -1543,6 +1553,7 @@ class _CreateModelPanel(QWidget):
         layout.addWidget(self._clip_waveform)
 
         self._file_list.currentRowChanged.connect(self._on_clip_selected)
+        self._file_list.itemSelectionChanged.connect(self._on_clip_selection_changed)
 
         layout.addSpacing(4)
 
@@ -2114,6 +2125,12 @@ class _CreateModelPanel(QWidget):
         except OSError:
             pass
         return new_paths
+
+    def _on_clip_selection_changed(self):
+        """Show isolate / remove / split only when at least one clip is selected."""
+        has_selection = bool(self._file_list.selectedItems())
+        for w in getattr(self, "_selection_only_widgets", []):
+            w.setVisible(has_selection)
 
     def _selected_clip_rows(self) -> list:
         """Indices of currently-selected rows in self._clips, sorted ascending."""
@@ -2913,11 +2930,42 @@ class _CreateModelPanel(QWidget):
         return False
 
     def _isolate_vocals(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select Songs to Extract Vocals From", "",
-            "Audio Files (*.wav *.flac *.mp3 *.ogg);;All Files (*)",
-        )
+        # Operate on whatever the user has selected in the file list.
+        rows = self._selected_clip_rows()
+        if not rows:
+            row = self._file_list.currentRow()
+            if 0 <= row < len(self._clips):
+                rows = [row]
+        if not rows:
+            return
+
+        paths = [self._clips[r] for r in rows]
+
+        # Skip files that are already isolated outputs — there's nothing
+        # useful to extract from them.
+        already = [p for p in paths if "_Isolated_Vocals" in os.path.basename(p)
+                   or "_isolated" in os.path.basename(p).lower()]
+        paths = [p for p in paths if p not in already]
         if not paths:
+            QMessageBox.information(
+                self, "Already Isolated",
+                "The selected clip(s) are already isolated vocals — "
+                "nothing more to extract."
+            )
+            return
+
+        # Confirm before kicking off (especially for many at once)
+        n = len(paths)
+        sample = "\n".join("  • " + os.path.basename(p) for p in paths[:5])
+        more = f"\n  ...and {n - 5} more" if n > 5 else ""
+        reply = QMessageBox.question(
+            self, "Isolate Vocals",
+            f"Isolate vocals from {n} song{'s' if n != 1 else ''}?\n\n"
+            f"{sample}{more}\n\n"
+            f"Each song takes ~30-90 seconds depending on length.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         first_run = not self._demucs_model_present()
@@ -2938,9 +2986,10 @@ class _CreateModelPanel(QWidget):
         self._iso_dir = tempfile.mkdtemp(prefix="svc_iso_")
 
         class _IsoWorker(QThread):
-            progress = pyqtSignal(str)
-            download_pct = pyqtSignal(int)
-            phase = pyqtSignal(str)  # "downloading" or "separating"
+            progress = pyqtSignal(str)              # human status line
+            download_pct = pyqtSignal(int)          # 0-100 during model download
+            phase = pyqtSignal(str)                 # "downloading" / "separating"
+            queue_progress = pyqtSignal(int, int, str)  # done, total, current_name
             finished_with = pyqtSignal(list, list)
 
             def __init__(self, paths, out_dir, first_run):
@@ -2956,28 +3005,27 @@ class _CreateModelPanel(QWidget):
                 total = len(self.paths)
 
                 def parse(line: str):
-                    # tqdm-style download progress: "  37%|███▋   | 30M/82M ..."
                     if self._download_phase:
                         m = re.search(r'(\d+)%\|', line)
                         if m:
                             self.download_pct.emit(int(m.group(1)))
                             return
-                        # Demucs starts producing per-segment progress after
-                        # the model is loaded — switch phases on first sign
                         if "Separating" in line or "track" in line.lower():
                             self._download_phase = False
                             self.phase.emit("separating")
                     self.progress.emit(line)
 
                 for i, p in enumerate(self.paths, 1):
-                    self.progress.emit(f"Isolating {i}/{total}: {os.path.basename(p)}")
+                    name = os.path.basename(p)
+                    self.queue_progress.emit(i - 1, total, name)
+                    self.progress.emit(f"Isolating {i}/{total}: {name}")
                     try:
                         stems = sep.separate(p, self.out_dir, on_log=parse)
                         vocals.append(stems["vocals"])
-                        # Once one song works, the model must be downloaded
                         self._download_phase = False
                     except Exception as e:
-                        errors.append(f"{os.path.basename(p)}: {e}")
+                        errors.append(f"{name}: {e}")
+                    self.queue_progress.emit(i, total, name)
                 self.finished_with.emit(vocals, errors)
 
         # Container for the download progress dialog (only used on first run)
@@ -3009,11 +3057,29 @@ class _CreateModelPanel(QWidget):
 
         self._iso_worker = _IsoWorker(paths, self._iso_dir, first_run)
 
+        # Use the existing training progress bar to track queue progress
+        # (training and isolation never run at the same time).
+        self._progress_bar.setRange(0, len(paths))
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
+        self._lbl_epoch.setVisible(False)
+
         def _on_progress(msg: str):
             self._lbl_status.setText(msg[:120])
             self._lbl_status.setStyleSheet(
                 "color: rgba(255, 255, 255, 75); font-size: 11px; background: transparent;"
             )
+
+        def _on_queue(done: int, total: int, name: str):
+            self._progress_bar.setValue(done)
+            remaining = total - done
+            if remaining > 0:
+                self._lbl_status.setText(
+                    f"Isolating {done + 1}/{total}: {name}"
+                    f"  ·  {remaining} song{'s' if remaining != 1 else ''} left"
+                )
+            else:
+                self._lbl_status.setText(f"Isolated {total} song{'s' if total != 1 else ''}.")
 
         def _on_dl_pct(pct: int):
             if dl_bar is not None:
@@ -3025,24 +3091,20 @@ class _CreateModelPanel(QWidget):
                 dl_dialog.accept()
 
         self._iso_worker.progress.connect(_on_progress)
+        self._iso_worker.queue_progress.connect(_on_queue)
         self._iso_worker.download_pct.connect(_on_dl_pct)
         self._iso_worker.phase.connect(_on_phase)
         self._iso_worker.finished_with.connect(self._on_iso_done)
-        # If finished arrives before phase changes (single quick song, model
-        # already there), close the dialog too.
         self._iso_worker.finished_with.connect(
             lambda *_: dl_dialog.accept() if dl_dialog and dl_dialog.isVisible() else None
         )
         self._iso_worker.start()
         if dl_dialog is not None:
-            dl_dialog.exec()  # blocks until accept()
-        # Status label takes over after the model is present
-        self._lbl_status.setText("Isolating vocals...")
-        self._lbl_status.setStyleSheet(
-            "color: rgba(255, 255, 255, 75); font-size: 11px; background: transparent;"
-        )
+            dl_dialog.exec()
 
     def _on_iso_done(self, vocals, errors):
+        # Drop the queue progress bar now that we're done.
+        self._progress_bar.setVisible(False)
         # Rename Demucs's bare "vocals.wav" to "<song>_Isolated_Vocals.wav" so
         # the filename carries the provenance — both for the badge in the file
         # list AND survives the copy into dataset_dir during training.
