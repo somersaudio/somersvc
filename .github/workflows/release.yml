@@ -24,6 +24,26 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Resolve tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify somersvc.spec version matches tag
+        run: |
+          set -e
+          TAG="${{ steps.tag.outputs.tag }}"
+          # Strip leading "v" — spec stores plain semver
+          EXPECTED="${TAG#v}"
+          # Pull CFBundleShortVersionString from somersvc.spec
+          ACTUAL=$(grep -E "'CFBundleShortVersionString':" somersvc.spec \
+                   | head -1 | sed -E "s/.*'([0-9.]+)'.*/\1/")
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::somersvc.spec CFBundleShortVersionString is '$ACTUAL' but the tag is '$TAG' (expected '$EXPECTED')."
+            echo "Bump 'CFBundleShortVersionString' and 'CFBundleVersion' in somersvc.spec to '$EXPECTED', commit, then retag."
+            exit 1
+          fi
+          echo "Spec version matches tag: $ACTUAL"
+
       - name: Build .app
         run: |
           pyinstaller --noconfirm somersvc.spec
@@ -33,9 +53,23 @@ jobs:
           chmod +x build_dmg.sh
           ./build_dmg.sh
 
-      - name: Resolve tag name
-        id: tag
-        run: echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+      - name: Resolve produced DMG path
+        id: dmg
+        run: |
+          set -e
+          # build_dmg.sh names the file from Info.plist's version. We've
+          # already verified that matches the tag, so just take whatever's
+          # in dist/ — this way a future spec/tag mismatch will fail at the
+          # earlier verify step with a clear error rather than here with
+          # "No such file or directory".
+          DMG=$(ls dist/SomerSVC-v*-arm64.dmg 2>/dev/null | head -1 || true)
+          if [ -z "$DMG" ] || [ ! -f "$DMG" ]; then
+            echo "::error::No DMG was produced in dist/. build_dmg.sh likely failed."
+            ls -la dist/ || true
+            exit 1
+          fi
+          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+          echo "Found DMG: $DMG"
 
       - name: Upload .dmg to releases repo
         env:
@@ -43,7 +77,7 @@ jobs:
         run: |
           set -e
           TAG="${{ steps.tag.outputs.tag }}"
-          DMG_VERSIONED="dist/SomerSVC-${TAG}-arm64.dmg"
+          DMG_VERSIONED="${{ steps.dmg.outputs.path }}"
           DMG_STABLE="dist/SomerSVC-arm64.dmg"
           # Provide a stable-named copy for the /releases/latest/download/ shortcut
           cp "$DMG_VERSIONED" "$DMG_STABLE"

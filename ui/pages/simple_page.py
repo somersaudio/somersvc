@@ -1778,6 +1778,11 @@ class _CreateModelPanel(QWidget):
         self._txt_epochs = QLineEdit("Auto")
         self._txt_epochs.setFixedSize(60, 28)
         self._txt_epochs.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._txt_epochs.setToolTip(
+            "Target epoch count. Enter an absolute number (e.g. 5626) or a "
+            "delta (e.g. +1126 to add to the current epoch). On a resume run, "
+            "any value below the current epoch is treated as a delta."
+        )
         self._txt_epochs.setStyleSheet("""
             QLineEdit {
                 background: rgba(255, 255, 255, 8);
@@ -3868,10 +3873,40 @@ class _CreateModelPanel(QWidget):
 
             # Calculate recommended epochs
             self._recommended_epochs = 2000
+            # When resuming, we know the current checkpoint epoch — used to
+            # interpret the user's input either as an absolute target or a
+            # "+N more epochs" delta.
+            cur_ep_for_input = 0
+            if resume and resume_from:
+                try:
+                    import re as _re
+                    _m = _re.search(r'G_(\d+)\.pth', os.path.basename(resume_from))
+                    if _m:
+                        cur_ep_for_input = int(_m.group(1))
+                except Exception:
+                    pass
             epochs_text = self._txt_epochs.text().strip()
             if epochs_text and epochs_text.lower() != "auto":
                 try:
-                    self._recommended_epochs = int(epochs_text)
+                    raw = epochs_text
+                    # "+1126" → add 1126 to current.
+                    if raw.startswith("+"):
+                        delta = int(raw[1:])
+                        self._recommended_epochs = cur_ep_for_input + delta
+                    else:
+                        n = int(raw)
+                        # Forgiving: a value <= current_epoch on a resume run
+                        # is almost certainly a delta the user typed by mistake
+                        # (would otherwise auto-stop instantly). Treat as +N.
+                        if cur_ep_for_input > 0 and n <= cur_ep_for_input:
+                            self._recommended_epochs = cur_ep_for_input + n
+                            self._log.append_line(
+                                f"Interpreting '{n}' as +{n} more epochs "
+                                f"(current: {cur_ep_for_input}, target: "
+                                f"{self._recommended_epochs})."
+                            )
+                        else:
+                            self._recommended_epochs = n
                 except ValueError:
                     pass
             else:
