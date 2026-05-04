@@ -265,8 +265,12 @@ class _WaveformWidget(QWidget):
 
         # Audio player
         from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+        from services.audio_device_tracker import register_audio_output
         self._player = QMediaPlayer()
         self._audio_out = QAudioOutput()
+        # Follow the system's default output so swapping headphones /
+        # speakers in macOS routes the app's audio there too.
+        register_audio_output(self._audio_out)
         self._player.setAudioOutput(self._audio_out)
         self._duration_ms = 0
         self._has_source = False

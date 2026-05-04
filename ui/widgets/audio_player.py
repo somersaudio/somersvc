@@ -16,6 +16,10 @@ class AudioPlayer(QWidget):
         super().__init__(parent)
         self.player = QMediaPlayer()
         self.audio_output = QAudioOutput()
+        # Follow the system default output (AirPods, speakers, etc.) so
+        # swapping output mid-session routes audio correctly.
+        from services.audio_device_tracker import register_audio_output
+        register_audio_output(self.audio_output)
         self.player.setAudioOutput(self.audio_output)
 
         # UI
