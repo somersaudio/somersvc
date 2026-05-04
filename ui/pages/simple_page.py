@@ -1887,7 +1887,9 @@ class _CreateModelPanel(QWidget):
         self._lbl_model_info.setWordWrap(True)
         self._lbl_model_info.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._lbl_model_info.setVisible(False)
-        self._lbl_model_info.setMaximumWidth(420)
+        # Wide enough that the two-line summary (counts row + recommendation
+        # row) doesn't wrap into 4-6 lines.
+        self._lbl_model_info.setMaximumWidth(900)
         info_row = QHBoxLayout()
         info_row.setContentsMargins(0, 0, 0, 0)
         info_row.addSpacing(60)  # clear the version label in the corner
@@ -2798,21 +2800,42 @@ class _CreateModelPanel(QWidget):
             self._lbl_model_info.setVisible(False)
             return
         metadata = self._load_model_metadata(name)
-        if not metadata:
-            self._lbl_model_info.setVisible(False)
-            return
-        # Pull whatever we can from metadata; tolerate missing fields
-        epochs = int(metadata.get("epochs", 0) or 0)
-        duration = float(metadata.get("dataset_duration_s", 0) or 0)
-        clips = int(metadata.get("dataset_clips", 0) or 0)
-        batch = int(metadata.get("batch_size", 16) or 16)
 
-        # If there isn't enough info to even describe it, hide the panel
+        # Metadata records what was used at the LAST training run. The dataset
+        # folder may have changed since (clips added/removed), so always
+        # measure live duration + clip count off disk for the recommendation.
+        from services.paths import DATASETS_DIR
+        ds_dir = os.path.join(str(DATASETS_DIR), name)
+        live_duration = 0.0
+        live_clips = 0
+        if os.path.isdir(ds_dir):
+            try:
+                import soundfile as _sf
+                for f in os.listdir(ds_dir):
+                    if not f.endswith((".wav", ".flac", ".mp3", ".ogg")):
+                        continue
+                    full = os.path.join(ds_dir, f)
+                    try:
+                        live_duration += _sf.info(full).duration
+                        live_clips += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        epochs = int((metadata or {}).get("epochs", 0) or 0)
+        meta_duration = float((metadata or {}).get("dataset_duration_s", 0) or 0)
+        meta_clips = int((metadata or {}).get("dataset_clips", 0) or 0)
+        batch = int((metadata or {}).get("batch_size", 16) or 16)
+
+        # Use live values when we have them, fall back to metadata otherwise
+        duration = live_duration if live_duration > 0 else meta_duration
+        clips = live_clips if live_clips > 0 else meta_clips
+
         if epochs <= 0 and duration <= 0:
             self._lbl_model_info.setVisible(False)
             return
 
-        # Format the duration as M:SS or H:MM:SS
         if duration >= 3600:
             h = int(duration // 3600)
             m = int((duration % 3600) // 60)
@@ -2823,16 +2846,17 @@ class _CreateModelPanel(QWidget):
             s = int(duration % 60)
             dur_str = f"{m}:{s:02d}"
 
-        # Same scoring rules used by the badge so the message stays consistent
+        # Audio score: dataset duration in minutes
         dur_score = 3 if duration >= 600 else (
             2 if duration >= 300 else (1 if duration >= 120 else 0)
         )
+        # Maturity: how many data passes the model has had per clip
         maturity = (epochs * batch / clips) if clips > 0 else 0
         train_score = 3 if maturity >= 2000 else (
             2 if maturity >= 800 else (1 if maturity >= 300 else 0)
         )
 
-        # Build recommendation pointing at the weakest dimension first
+        # Pick the weakest dimension and tell the user how to fix it
         if dur_score >= 3 and train_score >= 3:
             rec = "Looks fully trained — try the model first; only retrain if quality is off."
             rec_color = "rgba(80, 200, 120, 200)"
@@ -2841,9 +2865,8 @@ class _CreateModelPanel(QWidget):
                 dur_score, "more"
             )
             rec = f"Add more training audio (target {needed} of clean vocals) for the biggest quality jump."
-            rec_color = "rgba(245, 158, 11, 200)"  # amber
+            rec_color = "rgba(245, 158, 11, 200)"
         elif train_score < 3:
-            # Suggest a target epoch count that would push to the next tier
             target_maturity = 2000 if train_score == 2 else (800 if train_score == 1 else 300)
             extra_epochs = (
                 int((target_maturity - maturity) * clips / max(batch, 1))
@@ -2853,14 +2876,24 @@ class _CreateModelPanel(QWidget):
             rec = (
                 f"Continue training to ~{target_epochs} epochs for noticeably better quality."
             )
-            rec_color = "rgba(85, 153, 255, 220)"  # blue
+            rec_color = "rgba(85, 153, 255, 220)"
         else:
             rec = "Looks well-trained. Try it before adding more data."
             rec_color = "rgba(80, 200, 120, 200)"
 
+        # Note when the dataset has grown since training so the user knows
+        # the epoch count is referring to the older snapshot.
+        out_of_date = (
+            meta_duration > 0
+            and live_duration > 0
+            and abs(live_duration - meta_duration) > max(15.0, meta_duration * 0.05)
+        )
         epochs_str = f"{epochs:,} epochs" if epochs > 0 else "no epochs yet"
+        clips_str = f"{clips} clip{'s' if clips != 1 else ''}"
         if duration > 0:
-            top = f"<b>{dur_str}</b> of training audio · <b>{epochs_str}</b>"
+            top = f"<b>{dur_str}</b> · <b>{clips_str}</b> · <b>{epochs_str}</b>"
+            if out_of_date and epochs > 0:
+                top += "  <span style='color:rgba(245,158,11,180);'>(dataset has changed since last training)</span>"
         else:
             top = f"<b>{epochs_str}</b>"
         html = (
