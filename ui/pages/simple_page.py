@@ -1641,11 +1641,6 @@ class _CreateModelPanel(QWidget):
 
         layout.addSpacing(4)
 
-        # Step 3: Training Options
-        step3 = QLabel("3. Train")
-        step3.setStyleSheet("color: rgba(255, 255, 255, 70); font-size: 11px; font-weight: bold; background: transparent;")
-        layout.addWidget(step3)
-
         opts_row = QHBoxLayout()
         opts_row.setSpacing(12)
 
