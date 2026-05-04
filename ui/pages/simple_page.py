@@ -2954,19 +2954,49 @@ class _CreateModelPanel(QWidget):
             )
             return
 
-        # Confirm before kicking off (especially for many at once)
+        # Confirm — also asks whether to drop the pre-isolation source
+        # clips from the file list once the isolated vocals come back.
         n = len(paths)
         sample = "\n".join("  • " + os.path.basename(p) for p in paths[:5])
         more = f"\n  ...and {n - 5} more" if n > 5 else ""
-        reply = QMessageBox.question(
-            self, "Isolate Vocals",
+        from PyQt6.QtCore import Qt as _Qt
+        from PyQt6.QtWidgets import (
+            QDialog, QLabel, QCheckBox, QDialogButtonBox, QVBoxLayout,
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Isolate Vocals")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(420)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(20, 20, 20, 16)
+        v.setSpacing(10)
+        msg = QLabel(
             f"Isolate vocals from {n} song{'s' if n != 1 else ''}?\n\n"
             f"{sample}{more}\n\n"
-            f"Each song takes ~30-90 seconds depending on length.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            f"Each song takes ~30-90 seconds depending on length."
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        msg.setStyleSheet("color: #ddd; font-size: 12px;")
+        msg.setWordWrap(True)
+        v.addWidget(msg)
+        chk_replace = QCheckBox(
+            f"Remove original {'song' if n == 1 else 'songs'} after isolation"
+        )
+        chk_replace.setChecked(True)  # default: keep only the isolated vocals
+        chk_replace.setStyleSheet("color: #ccc; font-size: 12px;")
+        v.addWidget(chk_replace)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Isolate")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        v.addWidget(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        # Stash the per-source-path replacement preference so _on_iso_done
+        # can act on it after the worker finishes.
+        self._iso_replace_originals = chk_replace.isChecked()
+        self._iso_source_paths = list(paths)
 
         first_run = not self._demucs_model_present()
         if first_run:
@@ -3119,6 +3149,20 @@ class _CreateModelPanel(QWidget):
                 renamed.append(tagged)
             except Exception:
                 renamed.append(v)
+        # If the user opted to replace the pre-isolation sources, drop them
+        # from the clip list. We only remove ones that actually got an
+        # isolated counterpart — files that errored out stay so the user
+        # can still see them.
+        replace = getattr(self, "_iso_replace_originals", False)
+        sources = list(getattr(self, "_iso_source_paths", []))
+        if replace and renamed and sources:
+            ok_count = min(len(renamed), len(sources))  # in queue order
+            originals_to_drop = set(sources[:ok_count])
+            self._clips = [c for c in self._clips if c not in originals_to_drop]
+        # Reset the per-run state
+        self._iso_replace_originals = False
+        self._iso_source_paths = []
+
         if renamed:
             self._add_clips(renamed)
             self._lbl_status.setText(f"Isolated vocals from {len(renamed)} song(s).")
