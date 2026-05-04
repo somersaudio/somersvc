@@ -3669,21 +3669,52 @@ class _CreateModelPanel(QWidget):
                 except ValueError:
                     pass
             else:
-                try:
-                    import soundfile as _sf
-                    total_dur = sum(_sf.info(p).duration for p in self._clips)
-                    if total_dur < 180:
-                        self._recommended_epochs = 3000
-                    elif total_dur < 300:
-                        self._recommended_epochs = 2500
-                    elif total_dur < 600:
-                        self._recommended_epochs = 1500
-                    elif total_dur < 1800:
-                        self._recommended_epochs = 500
+                # Continue Training + Auto: target the next quality tier
+                # rather than the duration-default (which may be far below
+                # the model's current epoch count and would auto-stop on
+                # the first log line).
+                auto_target = None
+                if resume and resume_from:
+                    try:
+                        import re as _re
+                        m = _re.search(r'G_(\d+)\.pth', os.path.basename(resume_from))
+                        cur_ep = int(m.group(1)) if m else 0
+                    except Exception:
+                        cur_ep = 0
+                    clips_count = max(len(self._clips), 1)
+                    last_meta = self._load_model_metadata(name) or {}
+                    cur_batch = int(last_meta.get("batch_size", 16) or 16)
+                    maturity = (cur_ep * cur_batch) / clips_count
+                    if maturity >= 2000:
+                        target_maturity = max(maturity * 1.25, maturity + 200)
+                    elif maturity >= 800:
+                        target_maturity = 2000
+                    elif maturity >= 300:
+                        target_maturity = 800
                     else:
-                        self._recommended_epochs = 300
-                except Exception:
-                    pass
+                        target_maturity = 300
+                    extra_epochs = int(
+                        (target_maturity - maturity) * clips_count / max(cur_batch, 1)
+                    )
+                    auto_target = max(cur_ep + max(extra_epochs, 100), cur_ep + 100)
+                if auto_target is not None:
+                    self._recommended_epochs = auto_target
+                else:
+                    try:
+                        import soundfile as _sf
+                        total_dur = sum(_sf.info(p).duration for p in self._clips)
+                        if total_dur < 180:
+                            self._recommended_epochs = 3000
+                        elif total_dur < 300:
+                            self._recommended_epochs = 2500
+                        elif total_dur < 600:
+                            self._recommended_epochs = 1500
+                        elif total_dur < 1800:
+                            self._recommended_epochs = 500
+                        else:
+                            self._recommended_epochs = 300
+                    except Exception:
+                        pass
                 # Show the calculated value in the epochs field
                 self._txt_epochs.setText(str(self._recommended_epochs))
             # Print the target so users can confirm what auto picked.
