@@ -2892,11 +2892,22 @@ class _CreateModelPanel(QWidget):
         self._model_grid.adjustSize()
 
     def _demucs_model_present(self) -> bool:
-        """True if Demucs's htdemucs weights are already cached locally."""
+        """True if Demucs's htdemucs weights are already cached locally.
+
+        Demucs uses torch.hub which caches under ~/.cache on macOS too
+        (NOT ~/Library/Caches). Check both for safety.
+        """
         import glob
-        cache_dir = os.path.expanduser("~/Library/Caches/torch/hub/checkpoints")
-        # htdemucs ships as a few .th files with hashed names (e.g. 955717e8-*.th)
-        return bool(glob.glob(os.path.join(cache_dir, "*.th")))
+        candidates = [
+            os.path.expanduser("~/.cache/torch/hub/checkpoints"),
+            os.path.expanduser("~/Library/Caches/torch/hub/checkpoints"),
+            os.path.expanduser("~/.cache/torch/hub/demucs"),
+        ]
+        # htdemucs weights ship as hashed .th files (e.g. 955717e8-*.th)
+        for d in candidates:
+            if glob.glob(os.path.join(d, "*.th")):
+                return True
+        return False
 
     def _isolate_vocals(self):
         paths, _ = QFileDialog.getOpenFileNames(
