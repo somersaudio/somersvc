@@ -281,6 +281,12 @@ class LocalTrainingWorker(QThread):
             )
 
     def _run_train(self, root: Path):
+        # so-vits-svc-fork uses np.fromstring(..., sep="") (binary mode)
+        # which NumPy 2.x removed. Patch the installed file once so
+        # validation doesn't crash. No-op if already patched or the file
+        # isn't writable (bundled .app — main.py handles the same shim
+        # at runtime via the --svc-mode dispatcher).
+        self._patch_svc_fork_for_numpy2()
         cmd = _svc_argv() + [
             "train", "--model-path", str(root / "logs" / "44k"),
         ]
@@ -309,6 +315,40 @@ class LocalTrainingWorker(QThread):
     def _epoch_from_name(self, name: str):
         m = re.match(r'[GD]_(\d+)\.pth', name)
         return int(m.group(1)) if m else None
+
+    def _patch_svc_fork_for_numpy2(self) -> None:
+        """One-shot textual patch of the installed so-vits-svc-fork copy:
+        np.fromstring(..., sep="") → np.frombuffer(..., dtype=np.uint8).
+        Idempotent. Best-effort — silent if the file isn't writable.
+        """
+        try:
+            from so_vits_svc_fork import utils as _svc_utils
+            utils_path = Path(_svc_utils.__file__)
+        except Exception:
+            return
+        try:
+            text = utils_path.read_text()
+        except Exception:
+            return
+        # Already patched?
+        if "np.frombuffer(fig.canvas.tostring_argb()" in text:
+            return
+        old = 'np.fromstring(fig.canvas.tostring_argb(), dtype=np.uint8, sep="")'
+        new_call = 'np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)'
+        if old not in text:
+            return
+        try:
+            utils_path.write_text(text.replace(old, new_call))
+            self._log(
+                "Patched so-vits-svc-fork plot_spectrogram_to_numpy for "
+                "NumPy 2.x compatibility."
+            )
+        except Exception as e:
+            self._log(
+                f"Could not patch so-vits-svc-fork on disk ({e}). "
+                "If training crashes on validation, downgrade numpy<2 in "
+                "your venv."
+            )
 
     def _save_metadata(self, model_dir: Path, checkpoint: str):
         epoch_str = checkpoint.replace("G_", "").replace(".pth", "")

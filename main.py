@@ -83,6 +83,21 @@ def main():
     # the so-vits-svc-fork CLI instead of starting the GUI. This lets the
     # bundled .app act as its own `svc` binary.
     if len(sys.argv) > 1 and sys.argv[1] == "--svc-mode":
+        # NumPy 2.x removed binary-mode np.fromstring; svc-fork's
+        # plot_spectrogram_to_numpy still uses it. Monkey-patch so
+        # validation doesn't crash. Idempotent.
+        try:
+            import numpy as _np
+            if not getattr(_np, "_somersvc_compat_patched", False):
+                _orig_fromstring = _np.fromstring
+                def _fromstring_compat(string, dtype=float, count=-1, sep=""):
+                    if sep == "":
+                        return _np.frombuffer(string, dtype=dtype, count=count)
+                    return _orig_fromstring(string, dtype=dtype, count=count, sep=sep)
+                _np.fromstring = _fromstring_compat
+                _np._somersvc_compat_patched = True
+        except Exception:
+            pass
         from so_vits_svc_fork.__main__ import cli
         # The Click CLI parses sys.argv[1:], so reshape to look like `svc <subcmd> ...`
         sys.argv = ["svc"] + sys.argv[2:]
