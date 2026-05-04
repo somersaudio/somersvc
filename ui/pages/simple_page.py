@@ -2848,6 +2848,13 @@ class _CreateModelPanel(QWidget):
 
         self._model_grid.adjustSize()
 
+    def _demucs_model_present(self) -> bool:
+        """True if Demucs's htdemucs weights are already cached locally."""
+        import glob
+        cache_dir = os.path.expanduser("~/Library/Caches/torch/hub/checkpoints")
+        # htdemucs ships as a few .th files with hashed names (e.g. 955717e8-*.th)
+        return bool(glob.glob(os.path.join(cache_dir, "*.th")))
+
     def _isolate_vocals(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Select Songs to Extract Vocals From", "",
@@ -2855,45 +2862,128 @@ class _CreateModelPanel(QWidget):
         )
         if not paths:
             return
-        self._lbl_status.setText("Isolating vocals... (downloading model on first run, can take 1-2 min)")
-        self._lbl_status.setStyleSheet(
-            "color: rgba(255, 255, 255, 75); font-size: 11px; background: transparent;"
-        )
+
+        first_run = not self._demucs_model_present()
+        if first_run:
+            from PyQt6.QtWidgets import QMessageBox
+            ok = QMessageBox.information(
+                self, "One-time Vocal Model Download",
+                "The vocal isolation model needs to download once "
+                "(about 80 MB). Subsequent runs are instant.\n\n"
+                "Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            )
+            if ok != QMessageBox.StandardButton.Yes:
+                return
+
         from services.vocal_separator import VocalSeparator
         import tempfile
         self._iso_dir = tempfile.mkdtemp(prefix="svc_iso_")
 
         class _IsoWorker(QThread):
             progress = pyqtSignal(str)
-            finished_with = pyqtSignal(list, list)  # vocals_paths, errors
+            download_pct = pyqtSignal(int)
+            phase = pyqtSignal(str)  # "downloading" or "separating"
+            finished_with = pyqtSignal(list, list)
 
-            def __init__(self, paths, out_dir):
+            def __init__(self, paths, out_dir, first_run):
                 super().__init__()
                 self.paths, self.out_dir = paths, out_dir
+                self._download_phase = first_run
 
             def run(self):
+                import re
                 sep = VocalSeparator()
                 vocals = []
                 errors = []
                 total = len(self.paths)
+
+                def parse(line: str):
+                    # tqdm-style download progress: "  37%|███▋   | 30M/82M ..."
+                    if self._download_phase:
+                        m = re.search(r'(\d+)%\|', line)
+                        if m:
+                            self.download_pct.emit(int(m.group(1)))
+                            return
+                        # Demucs starts producing per-segment progress after
+                        # the model is loaded — switch phases on first sign
+                        if "Separating" in line or "track" in line.lower():
+                            self._download_phase = False
+                            self.phase.emit("separating")
+                    self.progress.emit(line)
+
                 for i, p in enumerate(self.paths, 1):
                     self.progress.emit(f"Isolating {i}/{total}: {os.path.basename(p)}")
                     try:
-                        stems = sep.separate(
-                            p, self.out_dir,
-                            on_log=lambda line: self.progress.emit(line),
-                        )
+                        stems = sep.separate(p, self.out_dir, on_log=parse)
                         vocals.append(stems["vocals"])
+                        # Once one song works, the model must be downloaded
+                        self._download_phase = False
                     except Exception as e:
                         errors.append(f"{os.path.basename(p)}: {e}")
                 self.finished_with.emit(vocals, errors)
 
-        self._iso_worker = _IsoWorker(paths, self._iso_dir)
-        self._iso_worker.progress.connect(
-            lambda msg: self._lbl_status.setText(msg[:120])
-        )
+        # Container for the download progress dialog (only used on first run)
+        dl_dialog = None
+        dl_bar = None
+        dl_label = None
+        if first_run:
+            from PyQt6.QtCore import Qt
+            from PyQt6.QtWidgets import QDialog, QLabel, QProgressBar, QVBoxLayout
+            dl_dialog = QDialog(self)
+            dl_dialog.setWindowTitle("Downloading Vocal Model")
+            dl_dialog.setModal(True)
+            dl_dialog.setFixedSize(420, 130)
+            dl_dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+            v = QVBoxLayout(dl_dialog)
+            v.setContentsMargins(20, 20, 20, 20)
+            v.setSpacing(10)
+            dl_label = QLabel("Downloading vocal isolation model (one-time, ~80 MB)...")
+            dl_label.setStyleSheet("color: #ddd; font-size: 13px;")
+            dl_label.setWordWrap(True)
+            v.addWidget(dl_label)
+            dl_bar = QProgressBar()
+            dl_bar.setRange(0, 100)
+            dl_bar.setValue(0)
+            v.addWidget(dl_bar)
+            hint = QLabel("Future runs use the cached model — instant.")
+            hint.setStyleSheet("color: rgba(255,255,255,80); font-size: 11px;")
+            v.addWidget(hint)
+
+        self._iso_worker = _IsoWorker(paths, self._iso_dir, first_run)
+
+        def _on_progress(msg: str):
+            self._lbl_status.setText(msg[:120])
+            self._lbl_status.setStyleSheet(
+                "color: rgba(255, 255, 255, 75); font-size: 11px; background: transparent;"
+            )
+
+        def _on_dl_pct(pct: int):
+            if dl_bar is not None:
+                dl_bar.setValue(pct)
+                dl_label.setText(f"Downloading vocal isolation model... {pct}%")
+
+        def _on_phase(p: str):
+            if dl_dialog is not None and p == "separating":
+                dl_dialog.accept()
+
+        self._iso_worker.progress.connect(_on_progress)
+        self._iso_worker.download_pct.connect(_on_dl_pct)
+        self._iso_worker.phase.connect(_on_phase)
         self._iso_worker.finished_with.connect(self._on_iso_done)
+        # If finished arrives before phase changes (single quick song, model
+        # already there), close the dialog too.
+        self._iso_worker.finished_with.connect(
+            lambda *_: dl_dialog.accept() if dl_dialog and dl_dialog.isVisible() else None
+        )
         self._iso_worker.start()
+        if dl_dialog is not None:
+            dl_dialog.exec()  # blocks until accept()
+        # Status label takes over after the model is present
+        self._lbl_status.setText("Isolating vocals...")
+        self._lbl_status.setStyleSheet(
+            "color: rgba(255, 255, 255, 75); font-size: 11px; background: transparent;"
+        )
 
     def _on_iso_done(self, vocals, errors):
         if vocals:
