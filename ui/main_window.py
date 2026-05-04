@@ -282,24 +282,112 @@ class MainWindow(QMainWindow):
         self.sidebar.item(2).setText(f"Training{dots}")
 
     def _check_pending_downloads(self):
-        """Check R2 for models that finished training while the app was closed."""
+        """Check R2 for models that finished training while the app was closed.
+        Prompt the user, then download in a background thread with a progress
+        window. Cloud copies are deleted after each verified local download.
+        """
         try:
             from services.training_orchestrator import TrainingOrchestrator
-            recovered = TrainingOrchestrator.check_pending_downloads(
-                MODELS_DIR,
+            candidates = TrainingOrchestrator.find_pending_cloud_models(
                 on_log=lambda msg: print(f"[Recovery] {msg}"),
             )
-            if recovered:
-                from PyQt6.QtWidgets import QMessageBox
-                names = ", ".join(recovered)
-                QMessageBox.information(
-                    self, "Models Recovered",
-                    f"The following models finished training while the app was closed "
-                    f"and have been downloaded:\n\n{names}",
-                )
-                self.models_page._refresh_models()
         except Exception as e:
             print(f"Pending download check error (non-fatal): {e}")
+            return
+        if not candidates:
+            return
+
+        from PyQt6.QtCore import QThread, pyqtSignal
+        from PyQt6.QtWidgets import (
+            QMessageBox, QDialog, QVBoxLayout, QLabel, QProgressBar,
+            QApplication,
+        )
+
+        names_lines = "\n".join(
+            f"  • {c['speaker']} ({c['checkpoint_name']})" for c in candidates
+        )
+        plural = "s" if len(candidates) > 1 else ""
+        reply = QMessageBox.question(
+            self, "Cloud Models Available",
+            f"{len(candidates)} trained model{plural} finished while the app was "
+            f"closed and {'are' if plural else 'is'} waiting in cloud storage:\n\n"
+            f"{names_lines}\n\n"
+            f"Download now? After download, {'they' if plural else 'it'} will be "
+            f"removed from cloud storage.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Background worker so the download doesn't block the UI thread.
+        class _CloudDownloadWorker(QThread):
+            progress = pyqtSignal(str, int, int, int)  # speaker, idx, total, pct
+            done = pyqtSignal(list, str)  # recovered, error
+
+            def __init__(self, models_dir, cands):
+                super().__init__()
+                self._models_dir = models_dir
+                self._cands = cands
+
+            def run(self):
+                try:
+                    recovered = TrainingOrchestrator.download_pending_models(
+                        self._models_dir, self._cands,
+                        on_log=lambda msg: print(f"[Recovery] {msg}"),
+                        on_progress=lambda s, i, t, p: self.progress.emit(s, i, t, p),
+                    )
+                    self.done.emit(recovered, "")
+                except Exception as e:
+                    self.done.emit([], str(e))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Downloading Cloud Models")
+        dlg.setModal(True)
+        dlg.setFixedSize(440, 130)
+        dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(20, 20, 20, 20)
+        v.setSpacing(10)
+        lbl = QLabel("Preparing download...")
+        lbl.setStyleSheet("color: #ddd; font-size: 13px;")
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        v.addWidget(bar)
+        hint = QLabel("Cloud copies will be deleted after each successful download.")
+        hint.setStyleSheet("color: rgba(255,255,255,80); font-size: 11px;")
+        v.addWidget(hint)
+
+        worker = _CloudDownloadWorker(MODELS_DIR, candidates)
+
+        def _on_progress(speaker: str, idx: int, total: int, pct: int):
+            lbl.setText(f"Downloading {speaker} ({idx} of {total})... {pct}%")
+            bar.setValue(pct)
+
+        def _on_done(recovered: list, err: str):
+            dlg.accept()
+            if err:
+                QMessageBox.warning(self, "Download Failed", err)
+                return
+            if recovered:
+                names = ", ".join(recovered)
+                QMessageBox.information(
+                    self, "Models Downloaded",
+                    f"Downloaded and saved locally:\n\n{names}\n\n"
+                    f"Cloud storage cleared.",
+                )
+                try:
+                    self.models_page._refresh_models()
+                except Exception:
+                    pass
+
+        worker.progress.connect(_on_progress)
+        worker.done.connect(_on_done)
+        # Keep a ref so the QThread isn't garbage-collected while running.
+        self._cloud_dl_worker = worker
+        worker.start()
+        dlg.exec()
 
     def _cleanup_orphaned_pods(self):
         """Terminate any RunPod pods from failed/stuck jobs on startup."""
@@ -421,6 +509,17 @@ class MainWindow(QMainWindow):
             self._btn_minimize.raise_()
 
     def closeEvent(self, event):
+        # If training is running, tell the worker we're closing so it leaves
+        # the pod & detached svc_train_runner alone. Training continues on
+        # the pod and ResumeWorker reattaches next launch.
+        try:
+            panel = getattr(self.simple_page, "_create_panel", None)
+            worker = getattr(panel, "_worker", None) if panel else None
+            if worker is not None and worker.isRunning():
+                if hasattr(worker, "request_app_close"):
+                    worker.request_app_close()
+        except Exception:
+            pass
         self.simple_page.save_session()
         self.training_page.cleanup()
         super().closeEvent(event)

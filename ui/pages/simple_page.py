@@ -799,6 +799,7 @@ class _ModelCarousel(QWidget):
         self._circular_cache = {}
         self._badge_rect = None  # cached hit area for the key badge
         self._best_match_pixmap = None  # circular artist image for best match overlay
+        self._show_grade_badge = False  # opt-in per-instance (Create panel only)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -840,6 +841,14 @@ class _ModelCarousel(QWidget):
         self._selected = 0
         self._anim_pos = 0.0
         self._badge_rect = None
+        self.update()
+
+    def set_grade_badges_enabled(self, enabled: bool):
+        """Show small letter-grade badge on each artist circle. Used by the
+        Create panel; the front-page carousel leaves it off so the picker
+        stays clean.
+        """
+        self._show_grade_badge = bool(enabled)
         self.update()
 
     def set_vocal_key(self, idx, key):
@@ -1153,6 +1162,34 @@ class _ModelCarousel(QWidget):
                 painter.setPen(pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(draw_x, draw_y, size, size)
+
+                # Grade badge (Create-panel carousel only): a small letter
+                # chip on the bottom-right of each trained artist's circle.
+                model = self._models[idx]
+                grade = model.get("grade")
+                if (self._show_grade_badge and grade and grade not in ("", "--")
+                        and not model.get("pending")):
+                    grade_color_hex = model.get("grade_color") or "#888"
+                    # Scale chip with circle so flanking images stay readable
+                    chip_d = max(14, int(size * 0.30))
+                    cx_chip = draw_x + size - int(chip_d * 0.78)
+                    cy_chip = draw_y + size - int(chip_d * 0.78)
+                    # 50% opaque badge (multiplied by item's existing opacity
+                    # so flanking items still fade out at the edges).
+                    painter.setOpacity(opacity * 0.5)
+                    chip_path = QPainterPath()
+                    chip_path.addEllipse(QRectF(cx_chip, cy_chip, chip_d, chip_d))
+                    painter.fillPath(chip_path, QBrush(QColor(grade_color_hex)))
+                    painter.setPen(QPen(QColor(0, 0, 0, 180), 1))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawEllipse(QRectF(cx_chip, cy_chip, chip_d, chip_d))
+                    # Letter
+                    font_pt = max(7, int(chip_d * 0.45))
+                    painter.setFont(QFont("Manrope", font_pt, QFont.Weight.Bold))
+                    painter.setPen(QColor(255, 255, 255, 240))
+                    painter.drawText(QRectF(cx_chip, cy_chip, chip_d, chip_d),
+                                     Qt.AlignmentFlag.AlignCenter, grade)
+                    painter.setOpacity(opacity)  # restore for subsequent items
 
                 # Draw artist name below non-center items
                 if not is_center and idx < len(self._models):
@@ -1508,7 +1545,7 @@ class _CreateModelPanel(QWidget):
         header.addWidget(back)
         header.addStretch()
 
-        title = QLabel("Create a Model")
+        title = QLabel("Models")
         title.setStyleSheet("color: #ddd; font-size: 18px; font-weight: bold; background: transparent;")
         header.addWidget(title)
         header.addStretch()
@@ -1541,8 +1578,11 @@ class _CreateModelPanel(QWidget):
 
         # Front-page-style carousel of artists. No "Best Match" entry — the
         # Create panel only shows actual trained models / dataset folders.
+        # Grade badges enabled here so the user sees model quality at a glance
+        # while picking which artist to add data to / continue training.
         self._carousel = _ModelCarousel()
         self._carousel.setFixedHeight(220)
+        self._carousel.set_grade_badges_enabled(True)
         self._carousel.model_selected.connect(self._on_carousel_select)
         layout.addWidget(self._carousel)
 
@@ -1555,8 +1595,8 @@ class _CreateModelPanel(QWidget):
         # "+ New artist" input — left-aligned above the Audio Clips section
         new_artist_row = QHBoxLayout()
         self._txt_new_name = QLineEdit()
-        self._txt_new_name.setPlaceholderText("+ New artist")
-        self._txt_new_name.setFixedSize(160, 28)
+        self._txt_new_name.setPlaceholderText("+ Create new artist model")
+        self._txt_new_name.setFixedSize(220, 28)
         self._txt_new_name.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._txt_new_name.setStyleSheet("""
             QLineEdit {
@@ -1882,14 +1922,14 @@ class _CreateModelPanel(QWidget):
 
         # Progress / Status
         self._lbl_status = QLabel("")
-        self._lbl_status.setStyleSheet("color: rgba(255, 255, 255, 50); font-size: 11px; background: transparent;")
+        self._lbl_status.setStyleSheet("color: #2DD4BF; font-size: 11px; background: transparent;")
         self._lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._lbl_status)
 
         # Epoch counter (e.g. "1/500") above the progress bar
         self._lbl_epoch = QLabel("")
         self._lbl_epoch.setStyleSheet(
-            "color: rgba(255, 255, 255, 70); font-size: 11px; "
+            "color: #2DD4BF; font-size: 11px; "
             "font-weight: 600; background: transparent;"
         )
         self._lbl_epoch.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1947,12 +1987,22 @@ class _CreateModelPanel(QWidget):
         info_row.addSpacing(60)  # clear the version label in the corner
         info_row.addWidget(self._lbl_model_info, 1)  # stretch=1: take the rest
         layout.addLayout(info_row)
+        # Lift it off the bottom so it doesn't collide with the
+        # "Open Output Folder" / "Set Output Folder" links beneath the panel.
+        layout.addSpacing(36)
 
         # State
         self._clips = []
         self._selected_name = ""
         self._training = False
         self._worker = None
+        # Initialise training-progress fields so a reattach via ResumeWorker
+        # can read them in _on_train_log without an AttributeError fatal.
+        self._recommended_epochs = 0
+        self._current_epoch = 0
+        self._auto_stop_fired = False
+        self._last_log_ckpt_epoch = None
+        self._last_log_was_wait = False
         self._image_cache_dir = os.path.join(CACHE_DIR, "artist_thumbs")
         # Per-artist staged clips for pending (not-yet-trained) artists.
         # Persists clip selections across artist switches before the dataset
@@ -1989,6 +2039,96 @@ class _CreateModelPanel(QWidget):
         name = (self._selected_name or "").strip()
         if name and not os.path.isdir(os.path.join(str(DATASETS_DIR), name)):
             self._pending_clips_by_artist[name] = list(self._clips)
+
+    def _filter_silent_clips(self, paths: list) -> tuple[list, int]:
+        """Return (kept_paths, removed_count). A clip is "silent" when its
+        RMS over the first ~10s is below ~-50 dBFS — quiet enough that it
+        can't possibly be useful training material.
+        """
+        try:
+            import soundfile as _sf
+            import numpy as _np
+        except Exception:
+            return list(paths), 0
+
+        kept = []
+        removed = 0
+        for p in paths:
+            try:
+                with _sf.SoundFile(p) as f:
+                    max_frames = min(f.frames, f.samplerate * 10)
+                    if max_frames <= 0:
+                        removed += 1
+                        continue
+                    data = f.read(max_frames, dtype="float32")
+                if getattr(data, "ndim", 1) > 1:
+                    data = data.mean(axis=1)
+                if data.size == 0:
+                    removed += 1
+                    continue
+                rms = float(_np.sqrt(_np.mean(data ** 2)))
+                # -50 dBFS ≈ 0.00316 linear
+                if rms < 0.003:
+                    removed += 1
+                    continue
+                kept.append(p)
+            except Exception:
+                # On read error, give the clip the benefit of the doubt —
+                # the user can still preview/remove it manually.
+                kept.append(p)
+        return kept, removed
+
+    def _show_toast(self, text: str, duration_ms: int = 2500) -> None:
+        """Floating pill-shaped message that fades in, holds, and fades out."""
+        from PyQt6.QtCore import (
+            QPropertyAnimation, QEasingCurve, QSequentialAnimationGroup,
+        )
+        from PyQt6.QtWidgets import QGraphicsOpacityEffect
+
+        toast = QLabel(text, self)
+        toast.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        toast.setStyleSheet(
+            "background: rgba(20, 20, 20, 230);"
+            "color: #fff;"
+            "border: 1px solid rgba(255,255,255,40);"
+            "border-radius: 14px;"
+            "padding: 10px 18px;"
+            "font-size: 13px;"
+            "font-weight: 500;"
+        )
+        toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        toast.adjustSize()
+        # Top-center of the panel so it doesn't fight the carousel/log.
+        toast.move(max(0, (self.width() - toast.width()) // 2), 80)
+
+        effect = QGraphicsOpacityEffect(toast)
+        toast.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        toast.show()
+        toast.raise_()
+
+        fade_in_ms = 280
+        fade_out_ms = 450
+        hold_ms = max(0, duration_ms - fade_in_ms - fade_out_ms)
+
+        fade_in = QPropertyAnimation(effect, b"opacity")
+        fade_in.setDuration(fade_in_ms)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.Type.OutQuad)
+
+        fade_out = QPropertyAnimation(effect, b"opacity")
+        fade_out.setDuration(fade_out_ms)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.Type.InQuad)
+
+        group = QSequentialAnimationGroup(toast)
+        group.addAnimation(fade_in)
+        group.addPause(hold_ms)
+        group.addAnimation(fade_out)
+        group.finished.connect(toast.deleteLater)
+        group.start()
 
     def _trained_files_path(self, name: str) -> str:
         """Path to the per-model JSON snapshot of trained-on filenames."""
@@ -2335,6 +2475,14 @@ class _CreateModelPanel(QWidget):
             for j, p in enumerate(new_paths):
                 self._clips.insert(idx + j, p)
             split_count += 1
+
+        # After splitting, drop any chunks that are essentially silence so
+        # the user doesn't waste pod time training on quiet gaps.
+        silent_removed = 0
+        if split_count:
+            kept, silent_removed = self._filter_silent_clips(self._clips)
+            self._clips = kept
+
         self._refresh_file_list()
         if skipped_short and split_count == 0:
             self._lbl_clips.setText("Selected clips are too short to split (need > 10s)")
@@ -2342,6 +2490,9 @@ class _CreateModelPanel(QWidget):
             self._lbl_clips.setText(
                 f"Split {split_count} clip(s); skipped {skipped_short} under 10 seconds"
             )
+        if silent_removed:
+            plural = "s" if silent_removed != 1 else ""
+            self._show_toast(f"{silent_removed} silent track{plural} removed")
 
     def _normalize_selected_clips(self):
         """Bring each selected clip's RMS to -12 dBFS, peak-safe (no clipping)."""
@@ -3291,14 +3442,23 @@ class _CreateModelPanel(QWidget):
                     pixmap = QPixmap(thumb)
 
             vocal_key = ""
+            metadata = {}
             meta_path = os.path.join(models_dir, name, "metadata.json")
             if os.path.exists(meta_path):
                 try:
                     import json as _json
                     with open(meta_path) as _f:
-                        vocal_key = (_json.load(_f) or {}).get("vocal_key", "")
+                        metadata = _json.load(_f) or {}
+                    vocal_key = metadata.get("vocal_key", "")
                 except Exception:
                     pass
+
+            # Compute the letter-grade badge so the carousel can paint it.
+            try:
+                from ui.widgets.voice_card import grade_for_metadata
+                grade, grade_color, grade_tip = grade_for_metadata(metadata)
+            except Exception:
+                grade, grade_color, grade_tip = ("", "", "")
 
             # An entry is "pending" if no trained checkpoint exists yet —
             # the carousel renders these at 20% opacity to signal "name
@@ -3322,6 +3482,9 @@ class _CreateModelPanel(QWidget):
                 "pixmap": pixmap,
                 "vocal_key": vocal_key,
                 "pending": pending,
+                "grade": grade,
+                "grade_color": grade_color,
+                "grade_tooltip": grade_tip,
             })
 
         self._carousel.set_models(models)
@@ -3792,6 +3955,15 @@ class _CreateModelPanel(QWidget):
                     f"(est. {eta} on A40) — training will auto-stop here."
                 )
             self._current_epoch = 0
+            self._auto_stop_fired = False
+            self._last_log_ckpt_epoch = None
+            self._last_log_was_wait = False
+            # Persist the auto-stop target so app close + reopen restores it.
+            try:
+                from services.job_store import update_job
+                update_job(job_id, recommended_epochs=int(self._recommended_epochs))
+            except Exception:
+                pass
             self._worker.finished_ok.connect(self._on_train_done)
             self._worker.error.connect(self._on_train_error)
             self._progress_bar.setValue(0)
@@ -3807,14 +3979,101 @@ class _CreateModelPanel(QWidget):
             self._on_train_error(str(e))
 
     def _stop_training(self):
-        if self._worker and self._worker.isRunning():
-            self._log.append_line("Stopping training — downloading model...")
-            self._lbl_status.setText("Stopping & downloading model...")
-            self._btn_stop_train.setEnabled(False)
-            self._worker.request_stop()
+        # Either a fresh TrainingWorker or a reattached ResumeWorker may be
+        # the live one. Find whichever has request_stop() and is running.
+        active = None
+        for attr in ("_worker", "_resume_worker"):
+            w = getattr(self, attr, None)
+            if w is not None and hasattr(w, "isRunning") and w.isRunning() \
+                    and hasattr(w, "request_stop"):
+                active = w
+                break
+        if active is None:
+            return
+        if getattr(self, "_auto_stop_fired", False):
+            return  # already in progress
+        reply = QMessageBox.question(
+            self, "Stop Training",
+            "Stop training now?\n\n"
+            "If a checkpoint has been saved, it will be downloaded before "
+            "the cloud GPU shuts down. If training hasn't started yet, the "
+            "GPU will just be released — nothing to save.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._auto_stop_fired = True
+        # IMMEDIATE feedback so the user knows the click registered.
+        self._btn_stop_train.setText("Stopping...")
+        self._btn_stop_train.setEnabled(False)
+        self._lbl_status.setText("Stopping — saving checkpoint, then downloading...")
+        # Pulse the status text so it reads as active rather than stuck.
+        self._lbl_status.setStyleSheet(
+            "color: #FBBF24; font-size: 12px; font-weight: 600; "
+            "background: transparent;"
+        )
+        self._log.append_line(">>> Stop requested. Saving checkpoint, then downloading model...")
+        # Force an immediate paint so the feedback shows before request_stop's
+        # synchronous SSH connect blocks the UI thread.
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+        active.request_stop()
+
+    def _format_log_line_for_display(self, line: str):
+        """Suppress verbose svc/Lightning/pip noise; synthesize clean checkpoint
+        lines. Returns the display string, or None to skip.
+
+        The raw line still flows through the epoch parser below — this only
+        controls what shows up in the user-facing log.
+        """
+        import re
+        if not line.strip():
+            return None
+
+        # Clean checkpoint event from Lightning's "Saving ... at epoch N to .../G_N.pth"
+        m = re.search(r'epoch\s+(\d+).*?\bG_(\d+)\.pth\b', line, re.IGNORECASE)
+        if m:
+            ep = m.group(1)
+            if getattr(self, "_last_log_ckpt_epoch", None) == ep:
+                return None
+            self._last_log_ckpt_epoch = ep
+            return f"Training in progress... latest checkpoint: G_{ep}.pth"
+
+        # ResumeWorker emits these directly — dedupe consecutive identical lines
+        m = re.match(r'^Training in progress\.\.\. latest checkpoint: G_(\d+)\.pth', line)
+        if m:
+            ep = m.group(1)
+            if getattr(self, "_last_log_ckpt_epoch", None) == ep:
+                return None
+            self._last_log_ckpt_epoch = ep
+            return line
+
+        # Collapse repeated "Waiting for training to produce checkpoints..." into one
+        if line.strip() == "Waiting for training to produce checkpoints...":
+            if getattr(self, "_last_log_was_wait", False):
+                return None
+            self._last_log_was_wait = True
+            return line
+        self._last_log_was_wait = False
+
+        # Drop svc/Lightning/torch/rich timestamped log lines and wrapped continuations
+        if re.match(r'^\s*\[\d{2}:\d{2}:\d{2}\]\s+(INFO|WARNING|DEBUG|ERROR)\b', line):
+            return None
+        if re.match(r'^\s+(INFO|WARNING|DEBUG|ERROR)\s+\[\d{2}:\d{2}:\d{2}\]', line):
+            return None
+        # Heavily-indented wrap continuations from rich's column wrapping
+        if re.match(r'^\s{15,}\S', line):
+            return None
+        # pip install chatter
+        if re.match(r'^\s*(Collecting|Downloading|Requirement already|Successfully (installed|built|uninstalled)|Building wheel|Getting requirements|Preparing metadata|Using cached|Installing collected|Attempting uninstall|Found existing installation)\b', line):
+            return None
+
+        return line
 
     def _on_train_log(self, line):
-        self._log.append_line(line)
+        display = self._format_log_line_for_display(line)
+        if display is not None:
+            self._log.append_line(display)
         import re
         epoch = None
         # Live progress line: "Epoch 37/9999"
@@ -3844,9 +4103,12 @@ class _CreateModelPanel(QWidget):
                 self._lbl_epoch.setText(f"{self._current_epoch}/{rec}")
                 self._lbl_epoch.setVisible(True)
                 self._lbl_status.setText(f"Training... Epoch {self._current_epoch}/{rec}")
-            # Auto-stop at target
-            if rec > 0 and self._current_epoch >= rec:
+            # Auto-stop at target. Latch so we don't re-fire when the matching
+            # D_<epoch>.pth save (or any later log line) is parsed too.
+            if (rec > 0 and self._current_epoch >= rec
+                    and not getattr(self, "_auto_stop_fired", False)):
                 if self._worker and self._worker.isRunning():
+                    self._auto_stop_fired = True
                     self._log.append_line(f"Reached target of {rec} epochs — stopping & downloading model...")
                     self._worker.request_stop()
 
@@ -3965,7 +4227,7 @@ class SimplePage(QWidget):
         search_row = QHBoxLayout()
         search_row.addWidget(self._search)
 
-        self._btn_create_model = QLabel("+ Create a Model")
+        self._btn_create_model = QLabel("My Models")
         self._btn_create_model.setStyleSheet("color: #fff; font-size: 11px; background: transparent;")
         self._btn_create_model.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_create_model.mousePressEvent = lambda e: self._show_create_model()
@@ -5741,6 +6003,13 @@ class SimplePage(QWidget):
         panel._progress_bar.setVisible(True)
         panel._progress_bar.setValue(55)
         panel._training = True
+        # Restore the auto-stop target persisted at training start so the
+        # parser still fires request_stop at the right epoch on reopen.
+        rec = job.get("recommended_epochs")
+        if isinstance(rec, int) and rec > 0:
+            panel._recommended_epochs = rec
+            panel._auto_stop_fired = False
+            panel._log.append_line(f"Restored auto-stop target: {rec} epochs")
         self._show_spinner("modeling")
         from workers.resume_worker import ResumeWorker
         panel._resume_worker = ResumeWorker(

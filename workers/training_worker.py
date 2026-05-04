@@ -56,3 +56,10 @@ class TrainingWorker(QThread):
         """Gracefully stop training — kills svc train, then downloads model."""
         if self._orchestrator:
             self._orchestrator.request_stop()
+
+    def request_app_close(self):
+        """User is quitting the app. Tell the orchestrator not to touch the
+        pod so the detached training can keep running untouched.
+        """
+        if self._orchestrator:
+            self._orchestrator.request_app_close()

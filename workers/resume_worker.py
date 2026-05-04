@@ -29,6 +29,42 @@ class ResumeWorker(QThread):
     def stop(self):
         self._running = False
 
+    def request_stop(self):
+        """User clicked Stop while a reattached run is in progress. Send the
+        stop sentinel + SIGTERM to svc train via a fresh SSH session so
+        Lightning checkpoints cleanly. The polling loop will then see svc
+        train exit and download the latest G_*.pth.
+        """
+        if getattr(self, "_stop_requested", False):
+            return
+        self._stop_requested = True
+        try:
+            from services.job_store import get_active_jobs
+            jobs = get_active_jobs()
+            if not jobs:
+                return
+            job = jobs[0]
+            ip = job.get("pod_ip")
+            port = job.get("pod_ssh_port")
+            if not ip or not port:
+                self.log_line.emit("Stop: no pod address on file.")
+                return
+            self.log_line.emit("Sending stop signal to pod...")
+            stop_ssh = SSHClient()
+            stop_ssh.connect(ip, port, self.ssh_key_path)
+            stop_ssh.exec_command(
+                "touch /tmp/somersvc_stop; "
+                "pkill -SIGTERM -f 'svc train' 2>/dev/null; "
+                "echo 'Stop signal delivered.'"
+            )
+            stop_ssh.close()
+            self.log_line.emit(
+                "Stop signal sent — Lightning is saving the checkpoint, "
+                "then it will be downloaded."
+            )
+        except Exception as e:
+            self.log_line.emit(f"Stop signal error: {e}")
+
     def run(self):
         if not self.api_key:
             return
@@ -191,25 +227,34 @@ class ResumeWorker(QThread):
             self._training_detected = False
 
     def _monitor_training(self, ssh: SSHClient, job_id: str):
-        """Tail the training output until the svc train process exits."""
-        # Bail out if svc train is not running
-        # Use [s]vc trick so pgrep doesn't match itself in the PTY
+        """Tail the detached runner log until svc_train_runner.done appears."""
+        # Bail out if neither the runner sentinel nor svc train is around.
         self._svc_running = False
         def _check(line):
             if "YES" in line:
                 self._svc_running = True
         ssh.exec_command(
-            "ps aux | grep '[s]vc train' | grep -v grep > /dev/null && echo YES || echo NO",
+            "( [ -f /tmp/svc_train_runner.pid ] && "
+            "  kill -0 $(cat /tmp/svc_train_runner.pid) 2>/dev/null ) "
+            "|| ps aux | grep '[s]vc train' | grep -v grep > /dev/null "
+            "&& echo YES || echo NO",
             on_stdout=_check,
         )
         if not self._svc_running:
             self.log_line.emit("Training process already finished.")
             return
+        # Prefer the detached runner log (has full retry/OOM output);
+        # fall back to the pod-internal train.log if not present.
         ssh.exec_command(
-            "tail -f /workspace/logs/44k/train.log 2>/dev/null &"
-            " TAIL_PID=$!;"
-            " while ps aux | grep '[s]vc train' | grep -v grep > /dev/null 2>&1; do sleep 5; done;"
-            " kill $TAIL_PID 2>/dev/null",
+            "LOG=/tmp/svc_train_runner.log;"
+            " [ -f $LOG ] || LOG=/workspace/logs/44k/train.log;"
+            " tail -F $LOG 2>/dev/null & TAIL_PID=$!;"
+            " while [ ! -f /tmp/svc_train_runner.done ] "
+            "       && ( [ -f /tmp/svc_train_runner.pid ] "
+            "            && kill -0 $(cat /tmp/svc_train_runner.pid) 2>/dev/null "
+            "            || ps aux | grep '[s]vc train' | grep -v grep > /dev/null 2>&1 ); "
+            " do sleep 5; done;"
+            " sleep 2; kill $TAIL_PID 2>/dev/null",
             on_stdout=self.log_line.emit,
         )
 

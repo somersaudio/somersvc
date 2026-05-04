@@ -36,10 +36,23 @@ class R2Client:
         """Upload a local file to R2."""
         self._client().upload_file(local_path, self.bucket, r2_key)
 
-    def download_file(self, r2_key: str, local_path: str):
-        """Download a file from R2 to local disk."""
+    def download_file(self, r2_key: str, local_path: str, callback=None):
+        """Download a file from R2 to local disk. `callback(bytes)` is invoked
+        with bytes-transferred-this-chunk during download (boto3 convention)
+        so callers can show progress.
+        """
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        self._client().download_file(self.bucket, r2_key, local_path)
+        self._client().download_file(
+            self.bucket, r2_key, local_path, Callback=callback,
+        )
+
+    def head_size(self, r2_key: str) -> int:
+        """Total size of an object in bytes (0 if it doesn't exist)."""
+        try:
+            resp = self._client().head_object(Bucket=self.bucket, Key=r2_key)
+            return int(resp.get("ContentLength", 0))
+        except Exception:
+            return 0
 
     def list_files(self, prefix: str) -> list[str]:
         """List files in R2 under a prefix."""
