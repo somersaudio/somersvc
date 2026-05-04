@@ -1920,6 +1920,10 @@ class _CreateModelPanel(QWidget):
         self._training = False
         self._worker = None
         self._image_cache_dir = os.path.join(CACHE_DIR, "artist_thumbs")
+        # Per-artist staged clips for pending (not-yet-trained) artists.
+        # Persists clip selections across artist switches before the dataset
+        # dir exists on disk.
+        self._pending_clips_by_artist: dict = {}
 
         self.setAcceptDrops(True)
 
@@ -2858,6 +2862,17 @@ class _CreateModelPanel(QWidget):
 
     def _select_model(self, name):
         """Select a model/dataset by name and load its clips."""
+        from services.paths import DATASETS_DIR
+        # Before switching away, save the current artist's staged clips
+        # so they persist across selections (until training creates a real
+        # dataset dir).
+        prev = getattr(self, "_selected_name", "")
+        if prev and prev != name:
+            prev_dataset = os.path.join(str(DATASETS_DIR), prev)
+            if not os.path.isdir(prev_dataset):
+                # Pending artist — keep their working clip list around
+                self._pending_clips_by_artist[prev] = list(self._clips)
+
         self._selected_name = name
         self._lbl_selected.setText(name)
         self._lbl_selected.setStyleSheet("color: rgba(255, 255, 255, 80); font-size: 12px; font-weight: bold; background: transparent;")
@@ -2865,14 +2880,17 @@ class _CreateModelPanel(QWidget):
         self._update_panel_background(name)
         # Kick off Spotify lookup if we don't already have an image for this name
         self._fetch_artist_image_async(name)
-        # Load existing clips
-        from services.paths import DATASETS_DIR
+        # Load existing clips: dataset dir on disk wins, else fall back to
+        # whatever was staged for this name during the current session.
         dataset_dir = os.path.join(str(DATASETS_DIR), name)
         if os.path.isdir(dataset_dir):
             self._clips = [os.path.join(dataset_dir, f) for f in sorted(os.listdir(dataset_dir))
                            if f.endswith(('.wav', '.flac', '.mp3', '.ogg'))]
+            # Promote: if we had pending clips for this name from this
+            # session, the on-disk version is the truth now — drop them.
+            self._pending_clips_by_artist.pop(name, None)
         else:
-            self._clips = []
+            self._clips = list(self._pending_clips_by_artist.get(name, []))
         self._refresh_file_list()
         # Highlight selected in grid
         self._update_grid_selection()
@@ -2961,10 +2979,18 @@ class _CreateModelPanel(QWidget):
         name = self._txt_new_name.text().strip()
         if not name:
             return
+        # Persist the previous artist's staged clips before switching
+        from services.paths import DATASETS_DIR
+        prev = getattr(self, "_selected_name", "")
+        if prev and prev != name:
+            prev_dataset = os.path.join(str(DATASETS_DIR), prev)
+            if not os.path.isdir(prev_dataset):
+                self._pending_clips_by_artist[prev] = list(self._clips)
         self._selected_name = name
         self._lbl_selected.setText(name)
         self._lbl_selected.setStyleSheet("color: rgba(255, 255, 255, 80); font-size: 12px; font-weight: bold; background: transparent;")
-        self._clips = []
+        # Restore pending clips for this name if we already had some staged
+        self._clips = list(self._pending_clips_by_artist.get(name, []))
         self._refresh_file_list()
 
         # Add a temporary "pending" entry to the carousel so the user sees
@@ -2977,10 +3003,20 @@ class _CreateModelPanel(QWidget):
                 None,
             )
             if existing is None:
-                # Use the same Best-Match wallpaper as the placeholder image
-                # so the carousel card matches the panel background.
-                best_bg = os.path.join(APP_DIR, "assets", "best_match.png")
-                placeholder = QPixmap(best_bg) if os.path.exists(best_bg) else None
+                # Prefer a previously-cached artist thumb, then the
+                # Best-Match wallpaper as a last resort placeholder.
+                placeholder = None
+                cached = os.path.join(self._image_cache_dir, f"{name}.jpg")
+                if os.path.exists(cached):
+                    pix = QPixmap(cached)
+                    if not pix.isNull():
+                        placeholder = pix
+                if placeholder is None:
+                    best_bg = os.path.join(APP_DIR, "assets", "best_match.png")
+                    if os.path.exists(best_bg):
+                        pix = QPixmap(best_bg)
+                        if not pix.isNull():
+                            placeholder = pix
                 models = list(self._carousel._models) + [{
                     "name": name,
                     "dir": "",
@@ -3153,7 +3189,7 @@ class _CreateModelPanel(QWidget):
                     names.add(name)
 
         models = []
-        for name in sorted(names):
+        for name in sorted(names, key=str.casefold):
             pixmap = None
             for ext in (".jpg", ".jpeg", ".png", ".webp"):
                 p = os.path.join(models_dir, name, f"image{ext}")
@@ -4197,7 +4233,7 @@ class SimplePage(QWidget):
         models.append({"name": "Best Match", "dir": "", "pixmap": best_pixmap, "vocal_key": "", "is_best_match": True})
 
         if os.path.exists(MODELS_DIR):
-            for name in sorted(os.listdir(MODELS_DIR)):
+            for name in sorted(os.listdir(MODELS_DIR), key=str.casefold):
                 model_dir = os.path.join(MODELS_DIR, name)
                 if not os.path.isdir(model_dir):
                     continue
