@@ -1306,7 +1306,10 @@ class _ClipBadgeDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
-        if "_isolated" not in text:
+        # Match the current "_Isolated_Vocals" suffix and the older "_isolated" tag
+        # so previously-isolated clips don't lose their badge after the rename.
+        lower = text.lower()
+        if "_isolated_vocals" not in lower and "_isolated" not in lower:
             return
         painter.save()
         try:
@@ -3040,15 +3043,15 @@ class _CreateModelPanel(QWidget):
         )
 
     def _on_iso_done(self, vocals, errors):
-        # Rename Demucs's bare "vocals.wav" to "<song>_isolated.wav" so the
-        # filename carries the provenance — both for the badge in the file
+        # Rename Demucs's bare "vocals.wav" to "<song>_Isolated_Vocals.wav" so
+        # the filename carries the provenance — both for the badge in the file
         # list AND survives the copy into dataset_dir during training.
         renamed = []
         for v in vocals:
             try:
                 song_dir = os.path.dirname(v)
                 song_stem = os.path.basename(song_dir)  # "Ain't No Sunshine_spotdown.org"
-                tagged = os.path.join(song_dir, f"{song_stem}_isolated.wav")
+                tagged = os.path.join(song_dir, f"{song_stem}_Isolated_Vocals.wav")
                 if v != tagged:
                     os.rename(v, tagged)
                 renamed.append(tagged)
