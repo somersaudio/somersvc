@@ -1346,12 +1346,96 @@ class _CreateModelPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAutoFillBackground(True)
+        # Background-image state — mirrors SimplePage so the panel can
+        # show the selected artist's photo behind the top half with
+        # the same gradient fade.
+        self._bg_pixmap = None
+        self._bg_opacity = 0.35
+        self._bg_cache = None
+        self._bg_cache_size = None
         self._init_ui()
 
+    def _build_bg_cache(self):
+        """Pre-composite the artist photo with gradient fades."""
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+        from PyQt6.QtGui import QLinearGradient
+        cache = QPixmap(w, h)
+        cache.fill(QColor("#1a1a1a"))
+        if self._bg_pixmap and not self._bg_pixmap.isNull():
+            p = QPainter(cache)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            scaled = self._bg_pixmap.scaled(
+                w, h,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x_off = (scaled.width() - w) // 2
+            y_off = (scaled.height() - h) // 2
+            cropped = scaled.copy(x_off, y_off, w, h)
+            p.setOpacity(self._bg_opacity)
+            p.drawPixmap(0, 0, cropped)
+            p.setOpacity(1.0)
+            # Top-half fade-down gradient
+            grad = QLinearGradient(0, 0, 0, h * 0.6)
+            grad.setColorAt(0.0, QColor(26, 26, 26, 0))
+            grad.setColorAt(0.5, QColor(26, 26, 26, 80))
+            grad.setColorAt(1.0, QColor(26, 26, 26, 255))
+            p.fillRect(0, 0, w, int(h * 0.6), grad)
+            # Solid floor below the fade
+            p.fillRect(0, int(h * 0.6), w, h - int(h * 0.6), QColor("#1a1a1a"))
+            # Side fades
+            side_w = int(w * 0.25)
+            grad_left = QLinearGradient(0, 0, side_w, 0)
+            grad_left.setColorAt(0.0, QColor(26, 26, 26, 255))
+            grad_left.setColorAt(1.0, QColor(26, 26, 26, 0))
+            p.fillRect(0, 0, side_w, int(h * 0.6), grad_left)
+            grad_right = QLinearGradient(w - side_w, 0, w, 0)
+            grad_right.setColorAt(0.0, QColor(26, 26, 26, 0))
+            grad_right.setColorAt(1.0, QColor(26, 26, 26, 255))
+            p.fillRect(w - side_w, 0, side_w, int(h * 0.6), grad_right)
+            p.end()
+        self._bg_cache = cache
+        self._bg_cache_size = (w, h)
+
     def paintEvent(self, event):
+        w, h = self.width(), self.height()
+        if self._bg_cache is None or self._bg_cache_size != (w, h):
+            self._build_bg_cache()
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(18, 18, 22))
+        if self._bg_cache:
+            p.drawPixmap(0, 0, self._bg_cache)
+        else:
+            p.fillRect(self.rect(), QColor("#1a1a1a"))
         p.end()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Invalidate the cache so the next paint rebuilds it for the new size
+        self._bg_cache = None
+
+    def _update_panel_background(self, name: str):
+        """Swap the artist photo behind the panel based on the selected model."""
+        from services.paths import MODELS_DIR
+        self._bg_pixmap = None
+        if name:
+            model_dir = os.path.join(str(MODELS_DIR), name)
+            thumb_dir = self._image_cache_dir if hasattr(self, "_image_cache_dir") else None
+            for candidate in [
+                os.path.join(model_dir, "image.jpg"),
+                os.path.join(model_dir, "image.jpeg"),
+                os.path.join(model_dir, "image.png"),
+                os.path.join(model_dir, "image.webp"),
+                os.path.join(thumb_dir, f"{name}.jpg") if thumb_dir else None,
+            ]:
+                if candidate and os.path.exists(candidate):
+                    pix = QPixmap(candidate)
+                    if not pix.isNull():
+                        self._bg_pixmap = pix
+                        break
+        self._bg_cache = None
+        self.update()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -2706,6 +2790,7 @@ class _CreateModelPanel(QWidget):
         self._lbl_selected.setText(name)
         self._lbl_selected.setStyleSheet("color: rgba(255, 255, 255, 80); font-size: 12px; font-weight: bold; background: transparent;")
         self._txt_new_name.clear()
+        self._update_panel_background(name)
         # Load existing clips
         from services.paths import DATASETS_DIR
         dataset_dir = os.path.join(str(DATASETS_DIR), name)
@@ -2751,6 +2836,8 @@ class _CreateModelPanel(QWidget):
         self._btn_continue_train.setVisible(False)
         self._btn_delete_model.setVisible(False)
         self._lbl_model_info.setVisible(False)
+        # No image yet for a brand-new name — clear any leftover background
+        self._update_panel_background("")
 
     def _update_model_info(self, name: str):
         """Populate the bottom-left summary for the selected model."""
