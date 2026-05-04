@@ -6,6 +6,7 @@ import webbrowser
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -163,6 +164,30 @@ class SettingsPage(QWidget):
         spotify_row.addWidget(self.txt_spotify_secret, 1)
         layout.addLayout(spotify_row)
 
+        # Train Locally — novelty option for users with very fast Macs (M5+)
+        # or NVIDIA GPUs. Off by default; pod training is the recommended
+        # path for everyone else.
+        layout.addSpacing(20)
+        self.chk_train_local = QCheckBox(
+            "Train locally (skip cloud GPU)"
+        )
+        self.chk_train_local.setToolTip(
+            "Run the entire training pipeline on this computer instead of "
+            "renting a cloud GPU. Only practical on very fast Macs (M5+) "
+            "or machines with an NVIDIA GPU. Most users should leave this off."
+        )
+        self.chk_train_local.setStyleSheet(
+            "QCheckBox { color: #ddd; font-size: 12px; }"
+        )
+        layout.addWidget(self.chk_train_local)
+        local_hint = QLabel(
+            "On a typical Mac, training that takes ~30 min on an A40 can "
+            "take many hours or days. Use only if you know what you're doing."
+        )
+        local_hint.setStyleSheet("color: rgba(255,255,255,90); font-size: 10px;")
+        local_hint.setWordWrap(True)
+        layout.addWidget(local_hint)
+
         # Save button
         layout.addSpacing(24)
         self.btn_save = QPushButton("Save Settings")
@@ -206,25 +231,35 @@ class SettingsPage(QWidget):
             self.txt_spotify_id.setText(config["spotify_client_id"])
         if config.get("spotify_client_secret"):
             self.txt_spotify_secret.setText(config["spotify_client_secret"])
+        # Train-locally toggle defaults to off; honour saved preference.
+        self.chk_train_local.setChecked(bool(config.get("train_locally", False)))
 
     def _save(self):
         api_key = self.txt_api_key.text().strip()
         ssh_key = self.txt_ssh_key.text().strip()
+        train_locally = self.chk_train_local.isChecked()
 
-        if not api_key:
+        # When training locally, we don't strictly need RunPod creds — but
+        # keep the validation so the user can still flip it off later.
+        if not api_key and not train_locally:
             self.lbl_status.setText("Please enter your RunPod API key")
             self.lbl_status.setStyleSheet("color: #ef4444;")
             return
 
-        ssh_path = os.path.expanduser(ssh_key)
-        if not os.path.exists(ssh_path):
-            self.lbl_status.setText(
-                f"SSH key not found: {ssh_path}. Click 'Auto-Setup SSH Key' to generate one."
-            )
-            self.lbl_status.setStyleSheet("color: #ef4444;")
-            return
+        if api_key:
+            ssh_path = os.path.expanduser(ssh_key) if ssh_key else ""
+            if ssh_key and not os.path.exists(ssh_path):
+                self.lbl_status.setText(
+                    f"SSH key not found: {ssh_path}. Click 'Auto-Setup SSH Key' to generate one."
+                )
+                self.lbl_status.setStyleSheet("color: #ef4444;")
+                return
 
-        config_data = {"runpod_api_key": api_key, "ssh_key_path": ssh_key}
+        config_data = {
+            "runpod_api_key": api_key,
+            "ssh_key_path": ssh_key,
+            "train_locally": train_locally,
+        }
 
         spotify_id = self.txt_spotify_id.text().strip()
         spotify_secret = self.txt_spotify_secret.text().strip()

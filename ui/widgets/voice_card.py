@@ -27,11 +27,24 @@ class _ClickableLabel(QLabel):
         self.clicked.emit()
 
 
+_GRADE_COLORS = {
+    "S": "#a855f7", "A+": "#22c55e", "A": "#22c55e",
+    "B+": "#5599ff", "B": "#5599ff", "C": "#f59e0b", "D": "#ef4444",
+}
+
+
 def grade_for_metadata(metadata: dict) -> tuple[str, str, str]:
     """Free-function form of VoiceCard._compute_grade so other UI surfaces
     can show the same badge. Returns (grade, color, tooltip).
+
+    Honours `metadata['user_grade_override']` if set (a manual grade the
+    user picked on a downloaded model where the auto-grader can't infer
+    quality from training data).
     """
     metadata = metadata or {}
+    override = metadata.get("user_grade_override")
+    if override and override in _GRADE_COLORS:
+        return (override, _GRADE_COLORS[override], f"Manually set to rank {override}")
     epochs = metadata.get("epochs", 0)
     duration = metadata.get("dataset_duration_s", 0)
     clips = metadata.get("dataset_clips", 0)

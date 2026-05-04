@@ -1617,6 +1617,7 @@ class _CreateModelPanel(QWidget):
         )
         self._lbl_meta_panel.setOpenExternalLinks(False)
         self._lbl_meta_panel.linkHovered.connect(self._on_meta_link_hover)
+        self._lbl_meta_panel.linkActivated.connect(self._on_meta_link_clicked)
         self._maturity_help_html: str = ""
         carousel_row.addWidget(self._lbl_meta_panel)
 
@@ -3594,6 +3595,59 @@ class _CreateModelPanel(QWidget):
         else:
             QToolTip.hideText()
 
+    def _on_meta_link_clicked(self, link: str) -> None:
+        """Handle clicks on inline links in the metadata panel."""
+        if link == "rank-override":
+            self._show_rank_override_menu()
+
+    def _show_rank_override_menu(self) -> None:
+        """Pop up a small menu so the user can manually pick a rank for a
+        downloaded model. Persists the choice to metadata.json under
+        `user_grade_override` and refreshes the carousel + panel.
+        """
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QCursor
+        menu = QMenu(self)
+        for letter in ["S", "A+", "A", "B+", "B", "C", "D"]:
+            act = menu.addAction(f"Rank {letter}")
+            act.triggered.connect(
+                lambda _checked=False, g=letter: self._set_rank_override(g)
+            )
+        menu.addSeparator()
+        clear = menu.addAction("Clear override (use auto)")
+        clear.triggered.connect(
+            lambda _checked=False: self._set_rank_override(None)
+        )
+        menu.exec(QCursor.pos())
+
+    def _set_rank_override(self, grade) -> None:
+        """Write or clear the rank override on the selected model's
+        metadata.json, then refresh dependent UI."""
+        name = (self._selected_name or "").strip()
+        if not name:
+            return
+        from services.paths import MODELS_DIR
+        meta_path = os.path.join(str(MODELS_DIR), name, "metadata.json")
+        if not os.path.exists(meta_path):
+            return
+        try:
+            import json as _json
+            with open(meta_path) as f:
+                meta = _json.load(f) or {}
+            if grade:
+                meta["user_grade_override"] = grade
+            else:
+                meta.pop("user_grade_override", None)
+            with open(meta_path, "w") as f:
+                _json.dump(meta, f, indent=2)
+        except Exception as e:
+            self._lbl_status.setText(f"Could not save rank: {e}")
+            return
+        # Refresh: metadata panel uses the new value; carousel re-pulls
+        # grades when populating.
+        self._update_metadata_panel(name)
+        self._populate_existing_datasets()
+
     def _build_maturity_help_html(self, epochs: int, batch: int,
                                    clips: int, maturity: float) -> str:
         """Tooltip body shown when the user hovers the (?) by Maturity.
@@ -3737,10 +3791,25 @@ class _CreateModelPanel(QWidget):
 
         rows = [f"<b style='font-size:13px;'>{name}</b>"]
         if grade:
-            rows.append(
-                f"<span style='color:{grade_color};font-weight:600;'>"
-                f"Rank {grade}</span>"
+            # Downloaded models — no local clips, but inspector data —
+            # let the user override the rank by clicking it. Auto-trained
+            # models keep the rank read-only since it's derived from data.
+            is_downloaded = (
+                clips == 0
+                and (metadata.get("sample_rate") or metadata.get("rvc_version"))
             )
+            if is_downloaded:
+                rows.append(
+                    f"<span style='color:{grade_color};font-weight:600;'>"
+                    f"<a href=\"rank-override\" "
+                    f"style=\"text-decoration:none;color:{grade_color};\">"
+                    f"Rank {grade} ▾</a></span>"
+                )
+            else:
+                rows.append(
+                    f"<span style='color:{grade_color};font-weight:600;'>"
+                    f"Rank {grade}</span>"
+                )
         rows.append("")  # blank line
 
         # Cycle the field-name color in a 4-step palette down the rows so
@@ -4293,16 +4362,36 @@ class _CreateModelPanel(QWidget):
             job = create_job(name)
             job_id = job["job_id"]
 
-            self._worker = TrainingWorker(
-                job_id=job_id,
-                speaker_name=name,
-                api_key=api_key,
-                ssh_key_path=ssh_key,
-                dataset_manager=dataset_mgr,
-                models_dir=str(MODELS_DIR),
-                f0_method=f0_method,
-                resume_from=resume_from,
-            )
+            # Train locally? Settings flag — pod is the default for everyone
+            # else. The local worker mirrors the orchestrator's surface so
+            # the rest of the UI plumbing (Stop, log parser, progress, etc.)
+            # works without changes.
+            train_locally = bool(config.get("train_locally", False))
+            if train_locally:
+                from workers.local_training_worker import LocalTrainingWorker
+                self._log.append_line(
+                    "Train Locally is on — running the full pipeline on this "
+                    "machine. This will be much slower than a cloud GPU."
+                )
+                self._worker = LocalTrainingWorker(
+                    job_id=job_id,
+                    speaker_name=name,
+                    dataset_manager=dataset_mgr,
+                    models_dir=str(MODELS_DIR),
+                    f0_method=f0_method,
+                    resume_from=resume_from,
+                )
+            else:
+                self._worker = TrainingWorker(
+                    job_id=job_id,
+                    speaker_name=name,
+                    api_key=api_key,
+                    ssh_key_path=ssh_key,
+                    dataset_manager=dataset_mgr,
+                    models_dir=str(MODELS_DIR),
+                    f0_method=f0_method,
+                    resume_from=resume_from,
+                )
             self._worker.log_line.connect(self._on_train_log)
             self._worker.status_changed.connect(lambda s: self._lbl_status.setText(s))
             self._worker.progress.connect(self._progress_bar.setValue)
@@ -4704,7 +4793,7 @@ class SimplePage(QWidget):
 
         # ===== SEARCH BAR =====
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Search artists...")
+        self._search.setPlaceholderText("Search artists on HuggingFace...")
         self._search.setStyleSheet("""
             QLineEdit {
                 background-color: rgba(255, 255, 255, 5);
@@ -6137,11 +6226,11 @@ class SimplePage(QWidget):
             self._hf_models = fetch_available_models()
             self._hf_loaded = True
             self._hide_spinner()
-            self._search.setPlaceholderText("Search artists...")
+            self._search.setPlaceholderText("Search artists on HuggingFace...")
             self._show_dropdown()
         except Exception as e:
             self._hide_spinner()
-            self._search.setPlaceholderText("Search artists...")
+            self._search.setPlaceholderText("Search artists on HuggingFace...")
             QMessageBox.warning(self, "Error", str(e))
 
     def _on_search_changed(self, text):
@@ -6237,28 +6326,27 @@ class SimplePage(QWidget):
         hf_lbl.move(rx - 175, vy - 9)
         hf_lbl.show()
 
-        # Download button
-        btn = QPushButton("Download", self._dropdown)
+        # Download — plain clickable text, no button chrome
+        btn = QLabel("Download", self._dropdown)
         btn.setObjectName("dl_btn_float")
         btn.setFixedSize(100, 26)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
         btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(94, 200, 180, 40);
-                border: 1px solid rgba(94, 200, 180, 80);
-                border-radius: 8px;
+            QLabel {
+                background: transparent;
                 color: rgba(94, 200, 180, 200);
                 font-size: 11px;
                 font-weight: bold;
-                padding: 0 12px;
             }
-            QPushButton:hover {
-                background: rgba(94, 200, 180, 80);
+            QLabel:hover {
                 color: white;
             }
         """)
         btn.move(rx - 110, vy - 13)
-        btn.clicked.connect(lambda _, i=item, b=btn: (self._download_from_dropdown(i), b.deleteLater()))
+        btn.mousePressEvent = (
+            lambda _e, i=item, b=btn: (self._download_from_dropdown(i), b.deleteLater())
+        )
         btn.show()
         # Hide all floats on scroll
         def _on_scroll(_):
@@ -6333,12 +6421,12 @@ class SimplePage(QWidget):
                     _sh.copy2(thumb, save_path)
 
             self._hide_spinner()
-            self._search.setPlaceholderText("Search artists...")
+            self._search.setPlaceholderText("Search artists on HuggingFace...")
             self._refresh_models()
             QMessageBox.information(self, "Downloaded", f"'{artist}' ready!")
         except Exception as e:
             self._hide_spinner()
-            self._search.setPlaceholderText("Search artists...")
+            self._search.setPlaceholderText("Search artists on HuggingFace...")
             QMessageBox.warning(self, "Failed", str(e))
 
     def dragEnterEvent(self, event):

@@ -137,7 +137,7 @@ class ModelsPage(QWidget):
 
         # Browse Artists — live search bar with dropdown
         self.browse_bar = QLineEdit()
-        self.browse_bar.setPlaceholderText("🔍  Search artists...")
+        self.browse_bar.setPlaceholderText("🔍  Search artists on HuggingFace...")
         self.browse_bar.setStyleSheet(
             """
             QLineEdit {
@@ -514,12 +514,12 @@ class ModelsPage(QWidget):
         try:
             self._hf_models = fetch_available_models()
             self._hf_loaded = True
-            self.browse_bar.setPlaceholderText("🔍  Search artists...")
+            self.browse_bar.setPlaceholderText("🔍  Search artists on HuggingFace...")
             self._show_dropdown()
             # Start caching artist thumbnails in background
             self._cache_artist_thumbnails()
         except Exception as e:
-            self.browse_bar.setPlaceholderText("🔍  Search artists...")
+            self.browse_bar.setPlaceholderText("🔍  Search artists on HuggingFace...")
             QMessageBox.warning(self, "Error", f"Could not load artists:\n{e}")
 
     def _cache_artist_thumbnails(self):
@@ -646,11 +646,11 @@ class ModelsPage(QWidget):
             # Fetch artist image
             self._ensure_artist_image(artist, dest)
 
-            self.browse_bar.setPlaceholderText("🔍  Search artists...")
+            self.browse_bar.setPlaceholderText("🔍  Search artists on HuggingFace...")
             self._refresh_models()
             self.model_downloaded.emit(artist)
         except Exception as e:
-            self.browse_bar.setPlaceholderText("🔍  Search artists...")
+            self.browse_bar.setPlaceholderText("🔍  Search artists on HuggingFace...")
             QMessageBox.warning(self, "Download Failed", str(e))
 
     def _hide_dropdown_on_click(self, event):
