@@ -6342,9 +6342,20 @@ class SimplePage(QWidget):
             }
         """)
         btn.move(rx - 110, vy - 13)
-        btn.mousePressEvent = (
-            lambda _e, i=item, b=btn: (self._download_from_dropdown(i), b.deleteLater())
-        )
+        # Defined as a named function (not a tuple-returning lambda) so the
+        # mousePressEvent override returns None like Qt expects, and any
+        # exception stays contained behind a try/except.
+        def _on_dl_click(_e, i=item, b=btn):
+            try:
+                self._download_from_dropdown(i)
+            except Exception as exc:
+                self._lbl_status.setText(f"Download failed: {exc}")
+            finally:
+                try:
+                    b.deleteLater()
+                except Exception:
+                    pass
+        btn.mousePressEvent = _on_dl_click
         btn.show()
         # Hide all floats on scroll
         def _on_scroll(_):

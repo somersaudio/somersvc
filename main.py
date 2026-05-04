@@ -2,6 +2,17 @@
 
 import sys
 import os
+import traceback
+
+# PyQt6 6.5+ aborts the process when an unhandled Python exception fires
+# inside a slot / event handler (sipBadCatcherResult → pyqt6_err_print →
+# qFatal). Installing a custom excepthook BEFORE importing PyQt6 keeps
+# the app alive: the traceback prints to stderr but the GUI keeps running.
+def _qt_safe_excepthook(exctype, value, tb):
+    sys.stderr.write("=== Unhandled exception in Qt slot (app stays alive) ===\n")
+    traceback.print_exception(exctype, value, tb)
+    sys.stderr.write("=" * 56 + "\n")
+sys.excepthook = _qt_safe_excepthook
 
 # Ensure the app directory is in the path
 app_dir = os.path.dirname(os.path.abspath(__file__))
