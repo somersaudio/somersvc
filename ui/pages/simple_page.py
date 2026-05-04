@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -1294,6 +1295,45 @@ class _ConvertButton(QWidget):
         painter.end()
 
 
+class _ClipBadgeDelegate(QStyledItemDelegate):
+    """Paints an ISOLATED badge on the right of clips whose basename contains '_isolated'."""
+
+    # Vintage gold (mid-saturation, slightly aged)
+    _BADGE_BG = QColor(193, 154, 70, 220)         # warm gold
+    _BADGE_BORDER = QColor(140, 105, 35, 230)     # darker gold edge
+    _BADGE_TEXT = QColor(28, 22, 8)               # dark coffee text
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        if "_isolated" not in text:
+            return
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            badge_text = "ISOLATED"
+            font = QFont(painter.font())
+            font.setPointSize(8)
+            font.setBold(True)
+            font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 110)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            text_w = metrics.horizontalAdvance(badge_text)
+            badge_w = text_w + 14
+            badge_h = max(16, option.rect.height() - 10)
+            margin = 8
+            x = option.rect.right() - badge_w - margin
+            y = option.rect.center().y() - badge_h // 2
+            badge_rect = QRectF(x, y, badge_w, badge_h)
+            painter.setPen(QPen(self._BADGE_BORDER, 1))
+            painter.setBrush(QBrush(self._BADGE_BG))
+            painter.drawRoundedRect(badge_rect, 4, 4)
+            painter.setPen(self._BADGE_TEXT)
+            painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
+        finally:
+            painter.restore()
+
+
 class _CreateModelPanel(QWidget):
     """Unified create-a-model panel combining dataset + training in a clean flow."""
     back_clicked = pyqtSignal()
@@ -1409,6 +1449,9 @@ class _CreateModelPanel(QWidget):
 
         # File list showing existing clips
         self._file_list = QListWidget()
+        # Custom delegate paints an "ISOLATED" badge in vintage gold on the
+        # right side of any clip whose basename contains "_isolated".
+        self._file_list.setItemDelegate(_ClipBadgeDelegate(self._file_list))
         self._file_list.setFixedHeight(200)
         # Allow shift-click / cmd-click / Cmd+A multi-select for bulk actions
         self._file_list.setSelectionMode(
@@ -2986,9 +3029,23 @@ class _CreateModelPanel(QWidget):
         )
 
     def _on_iso_done(self, vocals, errors):
-        if vocals:
-            self._add_clips(vocals)
-            self._lbl_status.setText(f"Isolated vocals from {len(vocals)} song(s).")
+        # Rename Demucs's bare "vocals.wav" to "<song>_isolated.wav" so the
+        # filename carries the provenance — both for the badge in the file
+        # list AND survives the copy into dataset_dir during training.
+        renamed = []
+        for v in vocals:
+            try:
+                song_dir = os.path.dirname(v)
+                song_stem = os.path.basename(song_dir)  # "Ain't No Sunshine_spotdown.org"
+                tagged = os.path.join(song_dir, f"{song_stem}_isolated.wav")
+                if v != tagged:
+                    os.rename(v, tagged)
+                renamed.append(tagged)
+            except Exception:
+                renamed.append(v)
+        if renamed:
+            self._add_clips(renamed)
+            self._lbl_status.setText(f"Isolated vocals from {len(renamed)} song(s).")
             self._lbl_status.setStyleSheet(
                 "color: rgba(80, 200, 120, 150); font-size: 11px; background: transparent;"
             )
