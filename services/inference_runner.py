@@ -6,8 +6,18 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-# Resolve svc binary from the same venv as this process
-_SVC_BIN = os.path.join(os.path.dirname(sys.executable), "svc")
+
+def _svc_argv() -> list[str]:
+    """Resolve how to invoke the svc CLI in both dev and bundled-app modes.
+
+    - Dev: a venv exists next to sys.executable with bin/svc → call that.
+    - Bundled .app: no separate svc binary; re-exec ourselves with
+      --svc-mode and main.py hands off to so-vits-svc-fork's CLI.
+    """
+    dev_bin = os.path.join(os.path.dirname(sys.executable), "svc")
+    if os.path.exists(dev_bin):
+        return [dev_bin]
+    return [sys.executable, "--svc-mode"]
 
 SUPPRESS = [
     "UserWarning", "FutureWarning", "UNEXPECTED", "HTTP Request",
@@ -46,8 +56,8 @@ class InferenceRunner:
         source_name = Path(source_wav).stem
         output_path = os.path.join(output_dir, f"{source_name}.out.wav")
 
-        cmd = [
-            _SVC_BIN, "infer", source_wav,
+        cmd = _svc_argv() + [
+            "infer", source_wav,
             "-m", model_path,
             "-o", output_path,
             "-s", "0",
