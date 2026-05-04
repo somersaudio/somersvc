@@ -1935,14 +1935,17 @@ class _CreateModelPanel(QWidget):
         self._lbl_model_info.setWordWrap(True)
         self._lbl_model_info.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._lbl_model_info.setVisible(False)
-        # Wide enough that the two-line summary (counts row + recommendation
-        # row) doesn't wrap into 4-6 lines.
-        self._lbl_model_info.setMaximumWidth(900)
+        # Force the label to take the full remaining width so the two-line
+        # summary doesn't wrap into 4–6 narrow lines.
+        from PyQt6.QtWidgets import QSizePolicy
+        self._lbl_model_info.setSizePolicy(
+            QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Preferred,
+        )
+        self._lbl_model_info.setMinimumWidth(720)
         info_row = QHBoxLayout()
         info_row.setContentsMargins(0, 0, 0, 0)
         info_row.addSpacing(60)  # clear the version label in the corner
-        info_row.addWidget(self._lbl_model_info)
-        info_row.addStretch()
+        info_row.addWidget(self._lbl_model_info, 1)  # stretch=1: take the rest
         layout.addLayout(info_row)
 
         # State
