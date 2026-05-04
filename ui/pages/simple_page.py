@@ -2863,6 +2863,8 @@ class _CreateModelPanel(QWidget):
         self._lbl_selected.setStyleSheet("color: rgba(255, 255, 255, 80); font-size: 12px; font-weight: bold; background: transparent;")
         self._txt_new_name.clear()
         self._update_panel_background(name)
+        # Kick off Spotify lookup if we don't already have an image for this name
+        self._fetch_artist_image_async(name)
         # Load existing clips
         from services.paths import DATASETS_DIR
         dataset_dir = os.path.join(str(DATASETS_DIR), name)
@@ -2893,6 +2895,66 @@ class _CreateModelPanel(QWidget):
         self._btn_continue_train.setVisible(has_svc_checkpoint)
         # Delete Model is available for any trained model (SVC or RVC)
         self._btn_delete_model.setVisible(has_any_model)
+
+    def _fetch_artist_image_async(self, name: str):
+        """Try Spotify in the background, drop the result into the artist
+        thumb cache, then refresh the carousel + panel background.
+        No-op if we already have a cached image for this name."""
+        if not name:
+            return
+        os.makedirs(self._image_cache_dir, exist_ok=True)
+        thumb_path = os.path.join(self._image_cache_dir, f"{name}.jpg")
+        if os.path.exists(thumb_path):
+            return
+
+        from PyQt6.QtCore import QThread, pyqtSignal
+
+        class _ImgFetcher(QThread):
+            done = pyqtSignal(str, str)  # name, saved_path
+
+            def __init__(self, artist, save_path):
+                super().__init__()
+                self.artist = artist
+                self.save_path = save_path
+
+            def run(self):
+                try:
+                    from services.spotify_client import SpotifyClient
+                    client = SpotifyClient(
+                        os.environ.get("SOMERSVC_SPOTIFY_ID", ""),
+                        os.environ.get("SOMERSVC_SPOTIFY_SECRET", ""),
+                    )
+                    if client.download_artist_image(self.artist, self.save_path):
+                        self.done.emit(self.artist, self.save_path)
+                except Exception:
+                    pass
+
+        if not hasattr(self, "_img_workers"):
+            self._img_workers = []
+        fetcher = _ImgFetcher(name, thumb_path)
+        fetcher.done.connect(self._on_artist_image_fetched)
+        # Hold a reference so it isn't GC'd before run() finishes
+        self._img_workers.append(fetcher)
+        fetcher.start()
+
+    def _on_artist_image_fetched(self, name: str, path: str):
+        """A background fetch completed — patch the carousel + background."""
+        if not path or not os.path.exists(path):
+            return
+        pix = QPixmap(path)
+        if pix.isNull():
+            return
+        # Patch any carousel entry with this name
+        if hasattr(self, "_carousel"):
+            for m in self._carousel._models:
+                if m.get("name") == name:
+                    m["pixmap"] = pix
+                    self._carousel._circular_cache.clear()
+                    self._carousel.update()
+                    break
+        # Refresh the panel wallpaper if the user still has this artist selected
+        if getattr(self, "_selected_name", "") == name:
+            self._update_panel_background(name)
 
     def _on_new_name_entered(self):
         """User typed a new artist name and pressed Enter."""
@@ -2941,6 +3003,9 @@ class _CreateModelPanel(QWidget):
         self._lbl_model_info.setVisible(False)
         # No image yet for a brand-new name — clear any leftover background
         self._update_panel_background("")
+        # Kick off a Spotify lookup so the placeholder swaps in the real
+        # artist photo within a second or two if the name matches a Spotify artist.
+        self._fetch_artist_image_async(name)
 
     def _update_model_info(self, name: str):
         """Populate the bottom-left summary for the selected model."""
