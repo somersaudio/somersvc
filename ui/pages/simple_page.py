@@ -818,8 +818,11 @@ class _ModelCarousel(QWidget):
         self._anim_timer.timeout.connect(self._anim_tick)
 
     def _on_gif_frame(self):
-        """Update Best Match (index 0) circular cache with current GIF frame."""
+        """Update Best Match circular cache with current GIF frame."""
         if not self._models or not self._gif_movie:
+            return
+        # No-op if there's no Best Match entry (e.g. used in Create panel)
+        if not self._models[0].get("is_best_match"):
             return
         # Only repaint if Best Match is visible (near the selected item)
         if abs(0 - self._anim_pos) > 4:
@@ -1029,18 +1032,19 @@ class _ModelCarousel(QWidget):
 
     def _get_circular(self, idx, size):
         """Get a circular pixmap for model at idx. Uses cached base size, fast-scales for animation."""
+        model = self._models[idx]
+        is_best = bool(model.get("is_best_match"))
         # Cache at the largest size this item will ever render at
-        base_size = int(self.CENTER_SIZE * 1.4) if idx == 0 else self.CENTER_SIZE
+        base_size = int(self.CENTER_SIZE * 1.4) if is_best else self.CENTER_SIZE
         base_key = (idx, base_size)
 
         if base_key not in self._circular_cache:
-            model = self._models[idx]
             # For Best Match with GIF, use current frame with soft fade
-            if idx == 0 and self._gif_movie:
+            if is_best and self._gif_movie:
                 px = self._gif_movie.currentPixmap()
             else:
                 px = model.get("pixmap")
-            if idx == 0 and px and not px.isNull():
+            if is_best and px and not px.isNull():
                 result = self._make_faded_circular(px, base_size)
             elif px and not px.isNull():
                 from ui.widgets.voice_card import VoiceCard
@@ -1100,14 +1104,15 @@ class _ModelCarousel(QWidget):
 
             painter.setOpacity(opacity)
 
-            render_size = int(size * 1.4) if idx == 0 else size
+            is_best_local = bool(self._models[idx].get("is_best_match"))
+            render_size = int(size * 1.4) if is_best_local else size
             px = self._get_circular(idx, render_size)
             draw_x = x - render_size // 2
             draw_y = cy - render_size // 2 + y_off
             painter.drawPixmap(draw_x, draw_y, px)
 
             # Draw border (skip for Best Match — it has a faded edge)
-            if idx != 0:
+            if not is_best_local:
                 is_center = dist < 0.3
                 border_color = QColor(255, 255, 255, 200) if is_center else QColor(80, 80, 80, int(120 * opacity))
                 pen = QPen(border_color, 2 if is_center else 1)
@@ -1482,42 +1487,34 @@ class _CreateModelPanel(QWidget):
 
         layout.addSpacing(8)
 
-        # Model image grid
-        from PyQt6.QtWidgets import QScrollArea
-        self._model_grid = QWidget()
-        self._model_grid_layout = QHBoxLayout(self._model_grid)
-        self._model_grid_layout.setContentsMargins(0, 0, 0, 0)
-        self._model_grid_layout.setSpacing(12)
-        self._model_grid_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._model_scroll = QScrollArea()
-        self._model_scroll.setWidget(self._model_grid)
-        self._model_scroll.setWidgetResizable(False)
-        self._model_scroll.setFixedHeight(80)
-        self._model_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._model_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._model_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; } QScrollArea > QWidget > QWidget { background: transparent; }")
-        self._model_scroll.viewport().setStyleSheet("background: transparent;")
-        layout.addWidget(self._model_scroll)
+        # Front-page-style carousel of artists. No "Best Match" entry — the
+        # Create panel only shows actual trained models / dataset folders.
+        self._carousel = _ModelCarousel()
+        self._carousel.setFixedHeight(220)
+        self._carousel.model_selected.connect(self._on_carousel_select)
+        layout.addWidget(self._carousel)
 
-        # Selected model label (shown below images when one is picked)
+        # Selected model label (under the carousel)
         self._lbl_selected = QLabel("")
         self._lbl_selected.setStyleSheet("color: rgba(255, 255, 255, 50); font-size: 11px; background: transparent;")
         self._lbl_selected.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._lbl_selected)
 
-        # New name input (will be added to end of model grid in _populate)
+        # "+ New artist" input — small row centered below the selected name
+        new_artist_row = QHBoxLayout()
+        new_artist_row.addStretch()
         self._txt_new_name = QLineEdit()
         self._txt_new_name.setPlaceholderText("+ New artist")
-        self._txt_new_name.setFixedSize(80, 44)
+        self._txt_new_name.setFixedSize(140, 28)
         self._txt_new_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._txt_new_name.setStyleSheet("""
             QLineEdit {
                 background: rgba(255, 255, 255, 5);
                 border: 1px dashed rgba(255, 255, 255, 20);
-                border-radius: 22px;
+                border-radius: 14px;
                 color: #aaa;
-                font-size: 9px;
-                padding: 0 4px;
+                font-size: 11px;
+                padding: 0 8px;
             }
             QLineEdit:focus {
                 border-color: rgba(255, 255, 255, 40);
@@ -1526,6 +1523,9 @@ class _CreateModelPanel(QWidget):
             }
         """)
         self._txt_new_name.returnPressed.connect(self._on_new_name_entered)
+        new_artist_row.addWidget(self._txt_new_name)
+        new_artist_row.addStretch()
+        layout.addLayout(new_artist_row)
 
         layout.addSpacing(4)
 
@@ -2664,16 +2664,14 @@ class _CreateModelPanel(QWidget):
             # No data left for this name — quietly remove just its card
             self._remove_card_widget(name)
 
+    def _on_carousel_select(self, idx: int):
+        """User picked an artist in the carousel — load that model."""
+        if 0 <= idx < len(self._carousel._models):
+            self._select_model(self._carousel._models[idx]["name"])
+
     def _remove_card_widget(self, name: str):
-        """Remove a single model-grid card without disturbing the rest."""
-        for i in range(self._model_grid_layout.count()):
-            item = self._model_grid_layout.itemAt(i)
-            w = item.widget() if item else None
-            if w and getattr(w, "_model_name", None) == name:
-                self._model_grid_layout.takeAt(i)
-                w.setParent(None)
-                w.deleteLater()
-                return
+        """Carousel-era replacement: just rebuild the carousel from disk."""
+        self._populate_existing_datasets()
 
     def _load_model_metadata(self, name: str) -> dict:
         """Load metadata.json for a model, or build a minimal one from disk."""
@@ -2696,71 +2694,13 @@ class _CreateModelPanel(QWidget):
             pass
         return {}
 
-    def _add_grade_badge(self, img_lbl: QLabel, name: str):
-        """Attach the quality grade badge to the bottom-right of img_lbl.
-        No-op if there's no scoreable data yet."""
-        from ui.widgets.voice_card import grade_for_metadata
-        metadata = self._load_model_metadata(name)
-        if not metadata:
-            return
-        grade, color, tip = grade_for_metadata(metadata)
-        if grade in ("--", "?"):
-            return
-        # Tag/replace any earlier badge so refreshes don't pile up
-        existing = img_lbl.findChild(QLabel, "grade_badge")
-        if existing:
-            existing.deleteLater()
-        badge = QLabel(grade, img_lbl)
-        badge.setObjectName("grade_badge")
-        badge.setFixedSize(18, 18)
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setToolTip(tip)
-        badge.setStyleSheet(
-            f"background-color: #1e1e1e; color: {color}; "
-            f"border: 1.5px solid {color}; border-radius: 9px; "
-            f"font-size: 8px; font-weight: bold;"
-        )
-        # Bottom-right corner — sit fully inside the 44x44 image so nothing clips
-        badge.move(44 - 18, 44 - 18)
-        badge.raise_()
-        badge.show()
+    def _add_grade_badge(self, img_lbl, name: str):
+        """No-op now that the carousel handles its own painting."""
+        return
 
     def _refresh_card_image(self, name: str):
-        """Re-evaluate the image of an existing card after model files changed."""
-        from services.paths import MODELS_DIR
-        from ui.widgets.voice_card import VoiceCard
-        for i in range(self._model_grid_layout.count()):
-            item = self._model_grid_layout.itemAt(i)
-            w = item.widget() if item else None
-            if not w or getattr(w, "_model_name", None) != name:
-                continue
-            # First child QLabel is the image (per _populate_existing_datasets layout)
-            img_lbl = None
-            for child in w.children():
-                if isinstance(child, QLabel) and child.objectName() != "name_lbl":
-                    img_lbl = child
-                    break
-            if img_lbl is None:
-                return
-            model_img = os.path.join(str(MODELS_DIR), name, "image.jpg")
-            thumb_path = os.path.join(self._image_cache_dir, f"{name}.jpg")
-            for img_path in (model_img, thumb_path):
-                if os.path.exists(img_path):
-                    px = QPixmap(img_path)
-                    img_lbl.setPixmap(VoiceCard._make_circular(px, 44))
-                    img_lbl.setStyleSheet("background: transparent;")
-                    self._add_grade_badge(img_lbl, name)
-                    return
-            # No image — fall back to initials
-            img_lbl.clear()
-            initials = "".join(p[0].upper() for p in name.split()[:2]) if name else "?"
-            img_lbl.setText(initials)
-            img_lbl.setStyleSheet(
-                "background: rgba(255,255,255,12); border-radius: 22px; "
-                "color: #aaa; font-size: 14px; font-weight: bold;"
-            )
-            self._add_grade_badge(img_lbl, name)
-            return
+        """Carousel-era replacement: rebuild the carousel from disk."""
+        self._populate_existing_datasets()
 
     def _delete_dataset(self):
         name = self._selected_name.strip()
@@ -2920,29 +2860,18 @@ class _CreateModelPanel(QWidget):
         self._lbl_model_info.setVisible(True)
 
     def _update_grid_selection(self):
-        """Update visual selection state — brighten selected name."""
-        for i in range(self._model_grid_layout.count()):
-            w = self._model_grid_layout.itemAt(i).widget()
-            if w and hasattr(w, '_model_name'):
-                selected = w._model_name == self._selected_name
-                # Find the name label (second child)
-                name_lbl = w.findChild(QLabel, "name_lbl")
-                if name_lbl:
-                    name_lbl.setStyleSheet(f"color: {'#fff' if selected else '#888'}; font-size: 8px; background: transparent;")
+        """Move the carousel to the currently-selected name (no-op if absent)."""
+        if not getattr(self, "_carousel", None):
+            return
+        for i, m in enumerate(self._carousel._models):
+            if m["name"] == self._selected_name:
+                self._carousel.select(i)
+                return
 
     def _populate_existing_datasets(self):
-        """Build visual grid of model images from downloaded models and datasets."""
+        """Feed the carousel with all known model/dataset names."""
         from services.paths import MODELS_DIR, DATASETS_DIR
-        from ui.widgets.voice_card import VoiceCard
 
-        # Clear existing grid
-        while self._model_grid_layout.count():
-            item = self._model_grid_layout.takeAt(0)
-            w = item.widget()
-            if w and w is not self._txt_new_name:
-                w.deleteLater()
-
-        # Collect names from both models and datasets
         names = set()
         models_dir = str(MODELS_DIR)
         if os.path.isdir(models_dir):
@@ -2955,55 +2884,44 @@ class _CreateModelPanel(QWidget):
                 if os.path.isdir(os.path.join(ds_dir, name)):
                     names.add(name)
 
+        models = []
         for name in sorted(names):
-            card = QWidget()
-            card._model_name = name
-            card.setFixedSize(56, 68)
-            card.setCursor(Qt.CursorShape.PointingHandCursor)
-            card.setStyleSheet("background: transparent;")
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(0, 0, 0, 0)
-            card_layout.setSpacing(3)
-
-            # Image
-            img_lbl = QLabel()
-            img_lbl.setFixedSize(44, 44)
-            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            img_lbl.setStyleSheet("background: transparent;")
-            # Check model folder image first, then artist thumbs cache
-            img_found = False
-            model_img = os.path.join(str(MODELS_DIR), name, "image.jpg")
-            thumb_path = os.path.join(self._image_cache_dir, f"{name}.jpg")
-            for img_path in [model_img, thumb_path]:
-                if os.path.exists(img_path):
-                    px = QPixmap(img_path)
-                    img_lbl.setPixmap(VoiceCard._make_circular(px, 44))
-                    img_found = True
+            pixmap = None
+            for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                p = os.path.join(models_dir, name, f"image{ext}")
+                if os.path.exists(p):
+                    pixmap = QPixmap(p)
                     break
-            if not img_found:
-                initials = "".join(w[0].upper() for w in name.split()[:2]) if name else "?"
-                img_lbl.setText(initials)
-                img_lbl.setStyleSheet("background: rgba(255,255,255,12); border-radius: 22px; color: #aaa; font-size: 14px; font-weight: bold;")
-            card_layout.addWidget(img_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
-            # Quality grade badge overlaid on the bottom-right of the image
-            self._add_grade_badge(img_lbl, name)
+            if pixmap is None:
+                thumb = os.path.join(self._image_cache_dir, f"{name}.jpg")
+                if os.path.exists(thumb):
+                    pixmap = QPixmap(thumb)
 
-            # Name
-            name_lbl = QLabel(name)
-            name_lbl.setObjectName("name_lbl")
-            name_lbl.setStyleSheet("color: #888; font-size: 8px; background: transparent;")
-            name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            name_lbl.setWordWrap(True)
-            card_layout.addWidget(name_lbl)
+            vocal_key = ""
+            meta_path = os.path.join(models_dir, name, "metadata.json")
+            if os.path.exists(meta_path):
+                try:
+                    import json as _json
+                    with open(meta_path) as _f:
+                        vocal_key = (_json.load(_f) or {}).get("vocal_key", "")
+                except Exception:
+                    pass
 
-            card.mousePressEvent = lambda e, n=name: self._select_model(n)
-            self._model_grid_layout.addWidget(card)
+            models.append({
+                "name": name,
+                "dir": os.path.join(models_dir, name),
+                "pixmap": pixmap,
+                "vocal_key": vocal_key,
+            })
 
-        # Add the "+ New artist" input at the end
+        self._carousel.set_models(models)
+        # Restore the previously-selected artist if it still exists
+        if self._selected_name:
+            for i, m in enumerate(models):
+                if m["name"] == self._selected_name:
+                    self._carousel.select(i)
+                    break
         self._txt_new_name.clear()
-        self._model_grid_layout.addWidget(self._txt_new_name)
-
-        self._model_grid.adjustSize()
 
     def _demucs_model_present(self) -> bool:
         """True if Demucs's htdemucs weights are already cached locally.
@@ -3986,7 +3904,7 @@ class SimplePage(QWidget):
         best_match_icon = os.path.join(APP_DIR, "assets", "best_match.png")
         best_pixmap = QPixmap(best_match_icon) if os.path.exists(best_match_icon) else None
         self._cmb_model.addItem("Best Match", "")
-        models.append({"name": "Best Match", "dir": "", "pixmap": best_pixmap, "vocal_key": ""})
+        models.append({"name": "Best Match", "dir": "", "pixmap": best_pixmap, "vocal_key": "", "is_best_match": True})
 
         if os.path.exists(MODELS_DIR):
             for name in sorted(os.listdir(MODELS_DIR)):
