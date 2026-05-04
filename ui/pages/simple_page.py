@@ -800,6 +800,7 @@ class _ModelCarousel(QWidget):
         self._badge_rect = None  # cached hit area for the key badge
         self._best_match_pixmap = None  # circular artist image for best match overlay
         self._show_grade_badge = False  # opt-in per-instance (Create panel only)
+        self._grade_badge_cache: dict = {}  # (grade, size) → scaled QPixmap
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -850,6 +851,28 @@ class _ModelCarousel(QWidget):
         """
         self._show_grade_badge = bool(enabled)
         self.update()
+
+    def _get_grade_pixmap(self, grade: str, size: int):
+        """Return a scaled badge pixmap for the given grade letter, cached."""
+        key = (grade, size)
+        cached = self._grade_badge_cache.get(key)
+        if cached is not None:
+            return cached
+        path = os.path.join(APP_DIR, "assets", "grade_badges", f"{grade}.png")
+        if not os.path.exists(path):
+            self._grade_badge_cache[key] = None
+            return None
+        px = QPixmap(path)
+        if px.isNull():
+            self._grade_badge_cache[key] = None
+            return None
+        scaled = px.scaled(
+            size, size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._grade_badge_cache[key] = scaled
+        return scaled
 
     def set_vocal_key(self, idx, key):
         """Update the vocal key for a model and repaint."""
@@ -1165,31 +1188,21 @@ class _ModelCarousel(QWidget):
 
                 # Grade badge (Create-panel carousel only): a small letter
                 # chip on the bottom-right of each trained artist's circle.
+                # Uses the pre-rendered badge images in assets/grade_badges/.
                 model = self._models[idx]
                 grade = model.get("grade")
                 if (self._show_grade_badge and grade and grade not in ("", "--")
                         and not model.get("pending")):
-                    grade_color_hex = model.get("grade_color") or "#888"
-                    # Scale chip with circle so flanking images stay readable
-                    chip_d = max(14, int(size * 0.30))
-                    cx_chip = draw_x + size - int(chip_d * 0.78)
-                    cy_chip = draw_y + size - int(chip_d * 0.78)
-                    # 50% opaque badge (multiplied by item's existing opacity
-                    # so flanking items still fade out at the edges).
-                    painter.setOpacity(opacity * 0.5)
-                    chip_path = QPainterPath()
-                    chip_path.addEllipse(QRectF(cx_chip, cy_chip, chip_d, chip_d))
-                    painter.fillPath(chip_path, QBrush(QColor(grade_color_hex)))
-                    painter.setPen(QPen(QColor(0, 0, 0, 180), 1))
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    painter.drawEllipse(QRectF(cx_chip, cy_chip, chip_d, chip_d))
-                    # Letter
-                    font_pt = max(7, int(chip_d * 0.45))
-                    painter.setFont(QFont("Manrope", font_pt, QFont.Weight.Bold))
-                    painter.setPen(QColor(255, 255, 255, 240))
-                    painter.drawText(QRectF(cx_chip, cy_chip, chip_d, chip_d),
-                                     Qt.AlignmentFlag.AlignCenter, grade)
-                    painter.setOpacity(opacity)  # restore for subsequent items
+                    chip_d = max(20, int(size * 0.42))
+                    badge_px = self._get_grade_pixmap(grade, chip_d)
+                    if badge_px is not None:
+                        # Anchor the badge so it slightly overlaps the circle
+                        # at the bottom-right.
+                        chip_x = draw_x + size - int(chip_d * 0.78)
+                        chip_y = draw_y + size - int(chip_d * 0.78)
+                        painter.setOpacity(opacity * 0.5)
+                        painter.drawPixmap(chip_x, chip_y, badge_px)
+                        painter.setOpacity(opacity)  # restore for next items
 
                 # Draw artist name below non-center items
                 if not is_center and idx < len(self._models):
@@ -1580,11 +1593,46 @@ class _CreateModelPanel(QWidget):
         # Create panel only shows actual trained models / dataset folders.
         # Grade badges enabled here so the user sees model quality at a glance
         # while picking which artist to add data to / continue training.
+        carousel_row = QHBoxLayout()
+        carousel_row.setContentsMargins(0, 0, 0, 0)
+        carousel_row.setSpacing(0)
+
+        # Left-side metadata panel for the currently selected artist.
+        # Populated by _update_metadata_panel().
+        self._lbl_meta_panel = QLabel("")
+        self._lbl_meta_panel.setStyleSheet(
+            "color: rgba(255, 255, 255, 80); font-size: 11px; "
+            "background: transparent; padding: 8px 12px;"
+        )
+        self._lbl_meta_panel.setTextFormat(Qt.TextFormat.RichText)
+        self._lbl_meta_panel.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._lbl_meta_panel.setFixedWidth(200)
+        self._lbl_meta_panel.setWordWrap(True)
+        # Allow hover events on inline <a href="..."> so the maturity help
+        # icon can show a contextual tooltip without making clicks navigate.
+        self._lbl_meta_panel.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        self._lbl_meta_panel.setOpenExternalLinks(False)
+        self._lbl_meta_panel.linkHovered.connect(self._on_meta_link_hover)
+        self._maturity_help_html: str = ""
+        carousel_row.addWidget(self._lbl_meta_panel)
+
         self._carousel = _ModelCarousel()
         self._carousel.setFixedHeight(220)
         self._carousel.set_grade_badges_enabled(True)
         self._carousel.model_selected.connect(self._on_carousel_select)
-        layout.addWidget(self._carousel)
+        carousel_row.addWidget(self._carousel, 1)
+
+        # Right-side spacer to keep the carousel visually centered against
+        # the metadata column on the left.
+        right_spacer = QLabel("")
+        right_spacer.setFixedWidth(200)
+        carousel_row.addWidget(right_spacer)
+
+        layout.addLayout(carousel_row)
 
         # Selected model label (under the carousel)
         self._lbl_selected = QLabel("")
@@ -1980,6 +2028,8 @@ class _CreateModelPanel(QWidget):
         self._lbl_model_info.setWordWrap(True)
         self._lbl_model_info.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._lbl_model_info.setVisible(False)
+        # RichText so inline <img> badges render in the suggestion.
+        self._lbl_model_info.setTextFormat(Qt.TextFormat.RichText)
         # Force the label to take the full remaining width so the two-line
         # summary doesn't wrap into 4–6 narrow lines.
         from PyQt6.QtWidgets import QSizePolicy
@@ -2008,6 +2058,10 @@ class _CreateModelPanel(QWidget):
         self._auto_stop_fired = False
         self._last_log_ckpt_epoch = None
         self._last_log_was_wait = False
+        # When resuming training, the trainer reports session-local epoch
+        # numbers (0..delta). We add this offset so the live counter shows
+        # TOTAL epochs continuous with the previous run.
+        self._resume_offset = 0
         self._image_cache_dir = os.path.join(CACHE_DIR, "artist_thumbs")
         # Per-artist staged clips for pending (not-yet-trained) artists.
         # Persists clip selections across artist switches before the dataset
@@ -2958,7 +3012,7 @@ class _CreateModelPanel(QWidget):
         QMessageBox.information(self, "Imported", f"Model \"{name}\" imported.")
 
     def _delete_model(self):
-        """Delete the trained model files (the dataset stays put)."""
+        """Delete the trained model files; then offer to delete the dataset too."""
         name = self._selected_name.strip()
         if not name:
             return
@@ -2970,7 +3024,7 @@ class _CreateModelPanel(QWidget):
             self, "Delete Model",
             f"Delete the trained model \"{name}\"? "
             f"This removes the model checkpoint from your app. "
-            f"The dataset and audio clips will be kept.",
+            f"You'll be asked next whether to also delete its dataset.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -2979,7 +3033,59 @@ class _CreateModelPanel(QWidget):
         shutil.rmtree(model_dir, ignore_errors=True)
         self._btn_continue_train.setVisible(False)
         self._btn_delete_model.setVisible(False)
-        self._lbl_status.setText(f"Model \"{name}\" deleted.")
+
+        # Offer to delete the dataset too — useful when the user is fully
+        # done with the artist (or starting fresh).
+        dataset_dir = os.path.join(str(DATASETS_DIR), name)
+        dataset_existed = os.path.isdir(dataset_dir)
+        deleted_dataset = False
+        if dataset_existed:
+            try:
+                clip_files = [
+                    f for f in os.listdir(dataset_dir)
+                    if f.endswith((".wav", ".flac", ".mp3", ".ogg"))
+                ]
+                clip_count = len(clip_files)
+            except Exception:
+                clip_count = 0
+            duration_str = ""
+            try:
+                import soundfile as _sf
+                total_dur = 0.0
+                for f in clip_files:
+                    try:
+                        total_dur += _sf.info(os.path.join(dataset_dir, f)).duration
+                    except Exception:
+                        pass
+                if total_dur > 0:
+                    m, s = divmod(int(total_dur), 60)
+                    duration_str = f", {m}:{s:02d} of audio"
+            except Exception:
+                pass
+            ds_reply = QMessageBox.question(
+                self, "Delete Dataset Too?",
+                f"Also delete the dataset for \"{name}\" "
+                f"({clip_count} clip{'s' if clip_count != 1 else ''}{duration_str})?\n\n"
+                f"This permanently removes the audio clips you uploaded for "
+                f"this artist. Choose No to keep them so you can train again later.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ds_reply == QMessageBox.StandardButton.Yes:
+                shutil.rmtree(dataset_dir, ignore_errors=True)
+                # Clear any in-memory staged clips for this artist too
+                try:
+                    self._pending_clips_by_artist.pop(name, None)
+                except Exception:
+                    pass
+                self._clips = []
+                self._refresh_file_list()
+                deleted_dataset = True
+
+        status_msg = (
+            f"Model and dataset for \"{name}\" deleted."
+            if deleted_dataset else f"Model \"{name}\" deleted."
+        )
+        self._lbl_status.setText(status_msg)
         self._lbl_status.setStyleSheet("color: rgba(255, 255, 255, 60); font-size: 11px; background: transparent;")
         # Auto-clear the message after 20s so it doesn't linger forever.
         # Captured text guards against clearing a later status set by other code.
@@ -2988,9 +3094,9 @@ class _CreateModelPanel(QWidget):
             if self._lbl_status.text() == deleted_text:
                 self._lbl_status.setText("")
         QTimer.singleShot(20_000, _clear_if_unchanged)
+
         # Targeted card update — don't full-rebuild the grid (causes overlap glitch)
-        dataset_dir = os.path.join(str(DATASETS_DIR), name)
-        if os.path.isdir(dataset_dir):
+        if dataset_existed and not deleted_dataset:
             # Dataset still exists, keep the card but refresh its image
             self._refresh_card_image(name)
         else:
@@ -3133,6 +3239,7 @@ class _CreateModelPanel(QWidget):
         self._check_existing_model(name)
         # Bottom-left summary: duration + epochs + recommendation
         self._update_model_info(name)
+        self._update_metadata_panel(name)
 
     def _check_existing_model(self, name):
         """Continue-Training requires an SVC G_*.pth; Delete works on any .pth file."""
@@ -3340,35 +3447,117 @@ class _CreateModelPanel(QWidget):
             2 if maturity >= 800 else (1 if maturity >= 300 else 0)
         )
 
-        # Pick the weakest dimension and tell the user how to fix it
-        if dur_score >= 3 and train_score >= 3:
-            rec = "Looks fully trained — try the model first; only retrain if quality is off."
-            rec_color = "rgba(80, 200, 120, 200)"
-        elif dur_score < train_score:
-            needed = {0: "2+ minutes", 1: "5+ minutes", 2: "10+ minutes"}.get(
-                dur_score, "more"
-            )
-            rec = f"Add more training audio (target {needed} of clean vocals) for the biggest quality jump."
-            rec_color = "rgba(245, 158, 11, 200)"
-        elif train_score < 3:
-            target_maturity = 2000 if train_score == 2 else (800 if train_score == 1 else 300)
+        # Suggestion phrased as "do X to reach rank Y" so the user knows
+        # exactly what pushes the badge up one level. When the suggestion
+        # involves adding audio, the matching epoch target is bundled in
+        # because more clips dilute the maturity ratio — the new dataset
+        # still needs training to hit the rank.
+        GRADE_LETTERS = {6: "S", 5: "A+", 4: "A", 3: "B+",
+                         2: "B", 1: "C", 0: "D"}
+        AUDIO_TARGET_SECS = {0: 120, 1: 300, 2: 600}      # to score 1, 2, 3
+        TRAIN_TARGET_MATURITY = {0: 300, 1: 800, 2: 2000}  # ditto
+
+        total_score = dur_score + train_score
+        current_grade = GRADE_LETTERS.get(total_score, "?")
+
+        def _audio_plus_train_suggestion(target_total: int) -> str:
+            # Audio: minutes to reach the next dur_score threshold.
+            target_seconds = AUDIO_TARGET_SECS[dur_score]
+            extra = max(60, target_seconds - duration)
+            mins = max(1, int(round(extra / 60)))
+            mins_str = f"{mins} more minute{'s' if mins != 1 else ''}"
+
+            # New clip count after adding audio (estimated from current
+            # average clip length, falling back to ~7s chunks).
+            if duration > 0 and clips > 0:
+                avg_clip = duration / clips
+                new_clips = max(clips + 1, int(target_seconds / max(avg_clip, 1)))
+            else:
+                new_clips = max(clips, int(target_seconds / 7))
+
+            # After audio bump, new dur_score = dur_score + 1. Training axis
+            # must stay at (target_total - new_dur_score) to land on the rank.
+            new_dur_score = dur_score + 1
+            needed_train_score = max(0, target_total - new_dur_score)
+            if needed_train_score >= 1:
+                req_maturity = TRAIN_TARGET_MATURITY[needed_train_score - 1]
+                req_epochs = int(req_maturity * new_clips / max(batch, 1))
+                req_epochs = max(req_epochs, epochs + 100)
+                eta = self._estimate_training_time_a40(
+                    req_epochs, current_epochs=epochs, clips=new_clips,
+                    is_resume=True,
+                )
+                eta_str = f" ({eta} on A40)" if eta else ""
+                return (
+                    f"Add {mins_str} of audio and train to "
+                    f"~{req_epochs:,} epochs{eta_str}"
+                )
+            return f"Add {mins_str} of audio"
+
+        def _train_only_suggestion(target_total: int) -> str:
+            needed_train_score = max(1, target_total - dur_score)
+            target_mat = TRAIN_TARGET_MATURITY[needed_train_score - 1]
             extra_epochs = (
-                int((target_maturity - maturity) * clips / max(batch, 1))
+                int((target_mat - maturity) * clips / max(batch, 1))
                 if clips > 0 else 0
             )
             target_epochs = max(epochs + max(extra_epochs, 100), epochs + 100)
             eta = self._estimate_training_time_a40(
                 target_epochs, current_epochs=epochs, clips=clips, is_resume=True,
             )
-            rec = (
-                f"Continue training to ~{target_epochs} epochs"
-                f"{(' (' + eta + ' on A40)') if eta else ''}"
-                f" for noticeably better quality."
+            eta_str = f" ({eta} on A40)" if eta else ""
+            return f"Continue training to ~{target_epochs:,} epochs{eta_str}"
+
+        def _grade_badge_html(grade: str, height: int = 20) -> str:
+            """Inline <img> tag for the grade badge so the suggestion shows
+            the actual badge artwork instead of plain text. Falls back to
+            the grade letter if the asset is missing.
+
+            margin-bottom shifts the image up 3px so it sits on the same
+            visual line as the surrounding text (Qt rich text aligns the
+            bottom of the image with the text baseline by default, which
+            looks slightly low for badges with internal padding).
+            """
+            path = os.path.join(APP_DIR, "assets", "grade_badges", f"{grade}.png")
+            if not os.path.exists(path):
+                return grade
+            return (
+                f'<img src="{path}" height="{height}" '
+                f'style="vertical-align:middle; margin-bottom:3px;" />'
             )
-            rec_color = "rgba(85, 153, 255, 220)"
-        else:
-            rec = "Looks well-trained. Try it before adding more data."
+
+        if total_score >= 6:
+            rec = (
+                f"{_grade_badge_html(current_grade)} (max) — try the model "
+                f"first; only retrain if quality is off."
+            )
             rec_color = "rgba(80, 200, 120, 200)"
+        else:
+            next_total = total_score + 1
+            next_grade = GRADE_LETTERS[next_total]
+            badge_html = _grade_badge_html(next_grade)
+            # Pick the axis with more headroom. Ties go to training because
+            # the user doesn't need to gather more audio for it.
+            bump_audio_first = (
+                dur_score < train_score
+                or (dur_score == train_score and train_score >= 3)
+            )
+            if bump_audio_first and dur_score < 3:
+                rec = f"{_audio_plus_train_suggestion(next_total)} to reach {badge_html}."
+                rec_color = "rgba(245, 158, 11, 200)"
+            elif train_score < 3 and clips > 0:
+                rec = f"{_train_only_suggestion(next_total)} to reach {badge_html}."
+                rec_color = "rgba(85, 153, 255, 220)"
+            elif dur_score < 3:
+                # Training already at 3/3 but audio still has headroom.
+                rec = f"{_audio_plus_train_suggestion(next_total)} to reach {badge_html}."
+                rec_color = "rgba(245, 158, 11, 200)"
+            else:
+                rec = (
+                    f"{_grade_badge_html(current_grade)} — try it before "
+                    f"adding more data."
+                )
+                rec_color = "rgba(80, 200, 120, 200)"
 
         # Note when the dataset has grown since training so the user knows
         # the epoch count is referring to the older snapshot.
@@ -3393,6 +3582,227 @@ class _CreateModelPanel(QWidget):
         )
         self._lbl_model_info.setText(html)
         self._lbl_model_info.setVisible(True)
+
+    def _on_meta_link_hover(self, link: str) -> None:
+        """Show / hide the maturity help tooltip when hovering the (?) icon."""
+        from PyQt6.QtWidgets import QToolTip
+        from PyQt6.QtGui import QCursor
+        if link == "maturity-help" and self._maturity_help_html:
+            QToolTip.showText(
+                QCursor.pos(), self._maturity_help_html, self._lbl_meta_panel
+            )
+        else:
+            QToolTip.hideText()
+
+    def _build_maturity_help_html(self, epochs: int, batch: int,
+                                   clips: int, maturity: float) -> str:
+        """Tooltip body shown when the user hovers the (?) by Maturity.
+        Highlights the tier the model is currently in, and shows the
+        calculation just above the tier list so the number isn't a black box.
+        """
+        if clips <= 0 or batch <= 0:
+            return ""
+        calc = (
+            f"<span style='color:rgba(255,255,255,140);'>"
+            f"epochs &times; batch &divide; clips:</span><br>"
+            f"<b>{epochs:,} &times; {batch} &divide; {clips} = "
+            f"{int(maturity):,}</b>"
+        )
+
+        TIERS = [
+            (0, 800, "keep training, model isn't ready yet"),
+            (800, 2000,
+             "it's usable; might be worth continuing for the last bit of polish"),
+            (2000, None,
+             "diminishing returns from more training. If quality still isn't "
+             "there, the answer is more or better audio, not more epochs"),
+        ]
+        rows = []
+        for low, high, msg in TIERS:
+            if high is None:
+                label = f"{low:,}+"
+                in_tier = maturity >= low
+            elif low == 0:
+                label = f"Below {high:,}"
+                in_tier = maturity < high
+            else:
+                label = f"{low:,}–{high:,}"
+                in_tier = low <= maturity < high
+            if in_tier:
+                rows.append(
+                    f"<span style='color:#2DD4BF;'>"
+                    f"&rarr; <b>{label}</b> &rarr; {msg}</span>"
+                )
+            else:
+                rows.append(
+                    f"<span style='color:rgba(255,255,255,150);'>"
+                    f"{label} &rarr; {msg}</span>"
+                )
+        return (
+            f"<div style='font-size:11px;line-height:1.6em;max-width:340px;'>"
+            f"{calc}<br><br>{'<br>'.join(rows)}</div>"
+        )
+
+    def _update_metadata_panel(self, name: str):
+        """Populate the left-side panel with detailed metadata for the
+        selected artist's trained model."""
+        if not getattr(self, "_lbl_meta_panel", None):
+            return
+        if not name:
+            self._lbl_meta_panel.setText("")
+            return
+
+        from services.paths import DATASETS_DIR
+        metadata = self._load_model_metadata(name) or {}
+
+        # Live counts off disk so they stay accurate after add/remove
+        ds_dir = os.path.join(str(DATASETS_DIR), name)
+        live_duration = 0.0
+        live_clips = 0
+        if os.path.isdir(ds_dir):
+            try:
+                import soundfile as _sf
+                for f in os.listdir(ds_dir):
+                    if not f.endswith((".wav", ".flac", ".mp3", ".ogg")):
+                        continue
+                    full = os.path.join(ds_dir, f)
+                    try:
+                        live_duration += _sf.info(full).duration
+                        live_clips += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        epochs = int(metadata.get("epochs", 0) or 0)
+        meta_duration = float(metadata.get("dataset_duration_s", 0) or 0)
+        meta_clips = int(metadata.get("dataset_clips", 0) or 0)
+        batch = int(metadata.get("batch_size", 0) or 0)
+        vocal_key = metadata.get("vocal_key", "") or ""
+        checkpoint = metadata.get("checkpoint", "") or ""
+        trained_at = metadata.get("trained_at", "") or ""
+
+        # Pending (no checkpoint yet) — show "ready to train"
+        if epochs <= 0 and not checkpoint:
+            if live_clips > 0:
+                m, s = divmod(int(live_duration), 60)
+                lines = [
+                    f"<b>{name}</b>",
+                    "<span style='color:rgba(245,158,11,200);'>Not trained yet</span>",
+                    "",
+                    f"Clips staged: <b>{live_clips}</b>",
+                    f"Duration: <b>{m}:{s:02d}</b>",
+                ]
+            else:
+                lines = [
+                    f"<b>{name}</b>",
+                    "<span style='color:rgba(255,255,255,50);'>No data yet</span>",
+                ]
+            self._lbl_meta_panel.setText(
+                "<div style='line-height:1.6em;'>" + "<br>".join(lines) + "</div>"
+            )
+            return
+
+        # Format duration → "Hh Mm" or "M:SS"
+        duration = live_duration if live_duration > 0 else meta_duration
+        if duration >= 3600:
+            h = int(duration // 3600)
+            m = int((duration % 3600) // 60)
+            dur_str = f"{h}h {m:02d}m"
+        else:
+            m = int(duration // 60)
+            s = int(duration % 60)
+            dur_str = f"{m}:{s:02d}"
+
+        clips = live_clips if live_clips > 0 else meta_clips
+        maturity = (epochs * batch / clips) if (clips > 0 and batch > 0) else 0
+
+        # Grade badge color hex from voice_card helper
+        try:
+            from ui.widgets.voice_card import grade_for_metadata
+            grade, grade_color, _tip = grade_for_metadata(metadata)
+        except Exception:
+            grade, grade_color = ("", "")
+
+        # "Trained at" → friendlier date
+        trained_str = ""
+        if trained_at and trained_at != "unknown":
+            try:
+                from datetime import datetime
+                # Stored as ISO 8601 (UTC). Strip TZ for display.
+                dt = datetime.fromisoformat(trained_at.replace("Z", "+00:00"))
+                trained_str = dt.strftime("%Y-%m-%d")
+            except Exception:
+                trained_str = trained_at[:10]
+
+        rows = [f"<b style='font-size:13px;'>{name}</b>"]
+        if grade:
+            rows.append(
+                f"<span style='color:{grade_color};font-weight:600;'>"
+                f"Rank {grade}</span>"
+            )
+        rows.append("")  # blank line
+
+        # Cycle the field-name color in a 4-step palette down the rows so
+        # the panel reads as a colorful at-a-glance dashboard.
+        # Green → Teal → Blue → Purple, repeating.
+        LABEL_COLORS = ["#22C55E", "#2DD4BF", "#5599FF", "#A855F7"]
+        row_idx = [0]
+
+        def _row(label, value, suffix=""):
+            color = LABEL_COLORS[row_idx[0] % 4]
+            row_idx[0] += 1
+            return (
+                f"<span style='color:{color};'>{label}</span> "
+                f"<b>{value}</b>{suffix}"
+            )
+
+        rows.append(_row("Epochs", f"{epochs:,}"))
+        if duration > 0:
+            rows.append(_row("Duration", dur_str))
+        if clips > 0:
+            rows.append(_row("Clips", f"{clips}"))
+        if batch > 0:
+            rows.append(_row("Batch", f"{batch}"))
+        if maturity > 0:
+            # Inline (?) help icon — hovering shows the tier breakdown +
+            # the live calculation. Stored on the panel so the linkHovered
+            # handler can read it.
+            self._maturity_help_html = self._build_maturity_help_html(
+                epochs, batch, clips, maturity,
+            )
+            help_icon = (
+                ' <a href="maturity-help" style="text-decoration:none;'
+                'color:rgba(255,255,255,90);">'
+                '<span style="border:1px solid currentColor;'
+                'border-radius:7px;padding:0 4px;font-size:9px;">?</span>'
+                '</a>'
+            )
+            rows.append(_row("Maturity", f"{int(maturity):,}", help_icon))
+        if vocal_key:
+            rows.append(_row("Vocal key", vocal_key))
+        if checkpoint:
+            rows.append(_row("Checkpoint", checkpoint))
+        if trained_str:
+            rows.append(_row("Trained", trained_str))
+
+        # Flag "out of date" when the dataset on disk has drifted from the
+        # snapshot used at training time.
+        out_of_date = (
+            meta_duration > 0
+            and live_duration > 0
+            and abs(live_duration - meta_duration) > max(15.0, meta_duration * 0.05)
+        )
+        if out_of_date:
+            rows.append("")
+            rows.append(
+                "<span style='color:rgba(245,158,11,180);font-size:10px;'>"
+                "Dataset has changed since last training.</span>"
+            )
+
+        self._lbl_meta_panel.setText(
+            "<div style='line-height:1.7em;'>" + "<br>".join(rows) + "</div>"
+        )
 
     def _update_grid_selection(self):
         """Move the carousel to the currently-selected name (no-op if absent).
@@ -3493,17 +3903,29 @@ class _CreateModelPanel(QWidget):
             })
 
         self._carousel.set_models(models)
-        # Restore the previously-selected artist if it still exists.
-        # blockSignals so we don't bounce back through _on_carousel_select.
+        # Restore the previously-selected artist if it still exists; if not
+        # (panel just opened for the first time), default to the first
+        # artist so the metadata panel + clip list aren't empty.
+        target_idx = -1
         if self._selected_name:
             for i, m in enumerate(models):
                 if m["name"] == self._selected_name:
-                    self._carousel.blockSignals(True)
-                    try:
-                        self._carousel.select(i)
-                    finally:
-                        self._carousel.blockSignals(False)
+                    target_idx = i
                     break
+        if target_idx < 0 and models:
+            target_idx = 0
+        if target_idx >= 0:
+            # blockSignals so we don't bounce back through _on_carousel_select
+            # while the carousel reflects its new selection.
+            self._carousel.blockSignals(True)
+            try:
+                self._carousel.select(target_idx)
+            finally:
+                self._carousel.blockSignals(False)
+            # Drive the dependent UI (metadata panel, clip list, buttons)
+            # via _select_model — which is what _on_carousel_select would
+            # have called if signals weren't blocked.
+            self._select_model(models[target_idx]["name"])
         self._txt_new_name.clear()
 
     def _demucs_model_present(self) -> bool:
@@ -3835,6 +4257,20 @@ class _CreateModelPanel(QWidget):
                 if g_files:
                     resume_from = os.path.join(model_dir, g_files[-1])
                     self._log.append_line(f"Resuming from checkpoint: {g_files[-1]}")
+                    # Capture the resume epoch so the live progress counter
+                    # can render absolute (total) epochs while the trainer
+                    # reports session-local 0..delta.
+                    try:
+                        import re as _re
+                        _m = _re.search(
+                            r'G_(\d+)\.pth', os.path.basename(resume_from)
+                        )
+                        self._resume_offset = int(_m.group(1)) if _m else 0
+                    except Exception:
+                        self._resume_offset = 0
+        # Fresh (non-resume) runs always start at zero offset.
+        if not resume:
+            self._resume_offset = 0
 
         try:
             from workers.training_worker import TrainingWorker
@@ -4119,10 +4555,17 @@ class _CreateModelPanel(QWidget):
             self._log.append_line(display)
         import re
         epoch = None
-        # Live progress line: "Epoch 37/9999"
-        m = re.search(r'Epoch (\d+)/(\d+)', line)
+        # ResumeWorker polling line: "Training in progress... latest checkpoint: G_25.pth"
+        m = re.match(
+            r'^Training in progress\.\.\. latest checkpoint: G_(\d+)\.pth', line
+        )
         if m:
             epoch = int(m.group(1))
+        # Live progress line: "Epoch 37/9999"
+        if epoch is None:
+            m = re.search(r'Epoch (\d+)/(\d+)', line)
+            if m:
+                epoch = int(m.group(1))
         # Checkpoint save: "Saving ... at epoch 100 to /workspace/.../G_100.pth"
         if epoch is None:
             m = re.search(r'(?:saving|state at).*?epoch\s+(\d+)', line, re.IGNORECASE)
@@ -4138,7 +4581,12 @@ class _CreateModelPanel(QWidget):
                 epoch = int(m.group(1))
 
         if epoch is not None and epoch > 0:
-            self._current_epoch = epoch
+            # Trainer reports session-local epoch on a resume run; add the
+            # offset so the user sees TOTAL epochs continuous with the prior
+            # run. The pod-side rename pass produces files matching this
+            # total count when training finishes.
+            offset = int(getattr(self, "_resume_offset", 0) or 0)
+            self._current_epoch = epoch + offset
             rec = self._recommended_epochs
             if rec > 0:
                 pct = min(int((self._current_epoch / rec) * 100), 100)
@@ -4187,14 +4635,33 @@ class _CreateModelPanel(QWidget):
     def _on_train_error(self, error):
         self._training = False
         self._btn_stop_train.setVisible(False)
+        # Reset Stop button text in case it was changed to "Stopping..."
+        self._btn_stop_train.setText("Stop Training")
+        self._btn_stop_train.setEnabled(True)
         self._btn_train.setVisible(True)
         self._btn_train.setEnabled(True)
         self._btn_train.setText("Start Training")
         self._check_existing_model(self._selected_name)
         self._progress_bar.setVisible(False)
         self._lbl_epoch.setVisible(False)
-        self._lbl_status.setText(f"Error: {error}")
-        self._lbl_status.setStyleSheet("color: rgba(255, 100, 100, 150); font-size: 11px; background: transparent;")
+        # User-cancelled errors get a friendlier message than "Error: stopped".
+        was_cancelled = (
+            getattr(self, "_auto_stop_fired", False)
+            or (isinstance(error, str)
+                and error.lower() in ("stopped", "cancelled"))
+        )
+        if was_cancelled:
+            self._lbl_status.setText("Training cancelled. Cloud GPU stopped.")
+            self._lbl_status.setStyleSheet(
+                "color: #2DD4BF; font-size: 11px; background: transparent;"
+            )
+        else:
+            self._lbl_status.setText(f"Error: {error}")
+            self._lbl_status.setStyleSheet(
+                "color: rgba(255, 100, 100, 150); font-size: 11px; "
+                "background: transparent;"
+            )
+        self._auto_stop_fired = False
         self.training_stopped.emit()
 
 
@@ -6059,6 +6526,13 @@ class SimplePage(QWidget):
             panel._recommended_epochs = rec
             panel._auto_stop_fired = False
             panel._log.append_line(f"Restored auto-stop target: {rec} epochs")
+        # Restore the resume offset so the live counter shows TOTAL epochs
+        # while the orchestrator's runner is reporting session-local numbers.
+        prev_epochs = job.get("previous_epochs")
+        if isinstance(prev_epochs, int) and prev_epochs > 0:
+            panel._resume_offset = prev_epochs
+        else:
+            panel._resume_offset = 0
         self._show_spinner("modeling")
         from workers.resume_worker import ResumeWorker
         panel._resume_worker = ResumeWorker(

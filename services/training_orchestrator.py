@@ -105,6 +105,14 @@ class TrainingOrchestrator:
         self._current_status = status
         self.on_status(status)
 
+    def _check_stopped(self):
+        """Raise RuntimeError("stopped") if the user has hit Stop. Called at
+        every phase boundary so a pre-training stop bails out promptly
+        instead of plowing through pod creation + SSH wait.
+        """
+        if self._stop_requested:
+            raise RuntimeError("stopped")
+
     def run(self, job_id: str, speaker_name: str, f0_method: str = "dio") -> dict:
         """Run the full training pipeline. Returns updated job dict."""
         pod_id = None
@@ -123,6 +131,7 @@ class TrainingOrchestrator:
             self._log("Packaging dataset...")
             dataset_tar = self.dataset_manager.package(speaker_name)
             self._log(f"Dataset packaged: {os.path.getsize(dataset_tar) / 1024 / 1024:.1f} MB")
+            self._check_stopped()
 
             # Step 2: Local preprocessing (runs on Mac while pod boots)
             use_local_preprocess = LocalPreprocessor.is_available()
@@ -135,6 +144,7 @@ class TrainingOrchestrator:
                 self._log("Local preprocessing complete!")
             else:
                 self._log("Local svc not available — preprocessing will run on pod")
+            self._check_stopped()
 
             # ==========================================
             # PHASE 2: POD SETUP
@@ -166,6 +176,9 @@ class TrainingOrchestrator:
                     _save_config(_config)
 
             if not cached_pod_id:
+                # Last chance to bail before we actually spin up a pod and
+                # start the billing meter.
+                self._check_stopped()
                 self._log("Creating RunPod GPU instance...")
                 ssh_pub_key = ""
                 pub_key_path = self.ssh_key_path + ".pub"
@@ -178,6 +191,11 @@ class TrainingOrchestrator:
                 self._pod_id_for_stop = pod_id
                 self._log(f"Pod created: {pod_id}")
                 update_job(job_id, pod_id=pod_id, status="creating_pod")
+
+            # If user clicked Stop while the API call was in flight, the pod
+            # is now running and being billed — bail and let `finally`
+            # terminate it.
+            self._check_stopped()
 
             # Step 4: Wait for pod
             self._status("waiting_for_pod")
@@ -295,7 +313,11 @@ class TrainingOrchestrator:
             self._log("Starting training...")
             update_job(job_id, status="training")
 
-            # Upload existing checkpoint if resuming
+            # Upload existing checkpoint if resuming. We track the resume
+            # epoch (resume_offset) so the post-training rename pass can
+            # produce filenames that reflect TOTAL epoch count instead of
+            # the trainer's session-local 0..delta range.
+            resume_offset = 0
             if self.resume_from and os.path.exists(self.resume_from):
                 resume_dir = os.path.dirname(self.resume_from)
                 resume_file = os.path.basename(self.resume_from)
@@ -313,35 +335,36 @@ class TrainingOrchestrator:
                 if os.path.exists(config_path):
                     ssh.exec_command("mkdir -p /workspace/configs/44k")
                     ssh.upload_file(config_path, "/workspace/configs/44k/config.json")
-                self._log("Resume checkpoint uploaded — training will continue from last epoch")
 
-                # Patch so-vits-svc-fork to start epoch counter from checkpoint epoch
-                resume_epoch = resume_file.replace("G_", "").replace(".pth", "")
-                if resume_epoch.isdigit():
-                    ssh.exec_command(
-                        "cat > /tmp/patch_epoch.py << 'PATCHEOF'\n"
-                        "import pathlib, re\n"
-                        "for p in pathlib.Path('/').glob('**/so_vits_svc_fork/train.py'):\n"
-                        "    code = p.read_text()\n"
-                        "    if 'Setting current epoch to 0' in code:\n"
-                        f"        code = code.replace('Setting current epoch to 0', 'Setting current epoch to {resume_epoch}')\n"
-                        f"        code = code.replace('trainer.current_epoch = 0', 'trainer.current_epoch = {resume_epoch}')\n"
-                        f"        code = code.replace('self.current_epoch = 0', 'self.current_epoch = {resume_epoch}')\n"
-                        "        p.write_text(code)\n"
-                        f"        print('Epoch counter will start from {resume_epoch}')\n"
-                        "    break\n"
-                        "PATCHEOF\n"
-                        "python3 /tmp/patch_epoch.py",
-                        on_stdout=self._log,
-                    )
+                # Capture the resume epoch from the filename. The trainer
+                # itself starts at 0 — we no longer try to patch its epoch
+                # counter (Lightning often overrides the patch); instead we
+                # cap max_epochs at the delta and rename output files post
+                # facto so the on-disk sequence reads as a continuation.
+                _re_str = resume_file.replace("G_", "").replace(".pth", "")
+                if _re_str.isdigit():
+                    resume_offset = int(_re_str)
+                self._log(
+                    f"Resume checkpoint uploaded (offset {resume_offset}) — "
+                    f"trainer will run the delta and final files will be "
+                    f"renamed back to total epoch count."
+                )
 
             # --- OPTIMIZATION 1: Increase batch size ---
             self._log("Optimizing training config for max speed...")
             target_epochs_for_pod = int(self.target_epochs or 0)
+            # Trainer starts at 0 each run (Lightning ignores G_<N>.pth's
+            # internal epoch on a weights-only load), so pass it the DELTA
+            # for resume runs. The post-training rename pass adds the
+            # offset back so on-disk filenames reflect total epochs.
+            if resume_offset > 0 and target_epochs_for_pod > 0:
+                effective_max_epochs = max(1, target_epochs_for_pod - resume_offset)
+            else:
+                effective_max_epochs = target_epochs_for_pod
             ssh.exec_command(
                 "cat > /tmp/optimize.py << 'OPTEOF'\n"
                 "import json, glob, subprocess\n"
-                f"TARGET_EPOCHS = {target_epochs_for_pod}\n"
+                f"TARGET_EPOCHS = {effective_max_epochs}\n"
                 "try:\n"
                 "    out = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits']).decode().strip()\n"
                 "    vram_mb = int(out.split(chr(10))[0])\n"
@@ -496,16 +519,19 @@ class TrainingOrchestrator:
             # Auto-stop watcher block: independent of Lightning's max_epochs,
             # this polls G_*.pth filenames and SIGTERMs svc train when the
             # latest checkpoint epoch hits target. Belt + suspenders to the
-            # cfg.train.epochs cap.
-            target_for_watcher = int(self.target_epochs or 0)
-            if target_for_watcher > 0:
+            # cfg.train.epochs cap. The watcher uses the SESSION-LOCAL target
+            # (delta) because the rename to total epochs happens after the
+            # training loop exits, not during it.
+            watcher_target = effective_max_epochs
+            if watcher_target > 0:
                 watcher_block = (
-                    f"TRAIN_TARGET={target_for_watcher}\n"
+                    f"TRAIN_TARGET={watcher_target}\n"
                     "(\n"
                     "  sleep 30\n"
                     "  while [ ! -f /tmp/svc_train_runner.done ]; do\n"
                     "    if [ -d /workspace/logs/44k ]; then\n"
-                    "      latest=$(ls /workspace/logs/44k/G_*.pth 2>/dev/null "
+                    "      latest=$(find /workspace/logs/44k -name 'G_*.pth' "
+                    "-newer /tmp/svc_session_start 2>/dev/null "
                     "| sed -E 's@.*G_([0-9]+)\\.pth@\\1@' | sort -n | tail -1)\n"
                     "      if [ -n \"$latest\" ] && [ \"$latest\" -ge \"$TRAIN_TARGET\" ]; then\n"
                     "        echo \"Auto-stop watcher: epoch $latest reached target $TRAIN_TARGET — stopping.\"\n"
@@ -524,6 +550,33 @@ class TrainingOrchestrator:
                 watcher_block = ""
                 watcher_kill = ""
 
+            # Post-training rename pass: when a resume run finishes, rename
+            # every G_<N>.pth / D_<N>.pth produced during this session by
+            # adding the resume offset, so the on-disk filenames reflect
+            # the TOTAL epoch count instead of the trainer's session-local
+            # 0..delta range. Drops the original resume checkpoints since
+            # the renamed final ones supersede them.
+            if resume_offset > 0:
+                rename_block = (
+                    f"RESUME_OFFSET={resume_offset}\n"
+                    "if [ -d /workspace/logs/44k ]; then\n"
+                    "  echo \"Renaming session checkpoints (+$RESUME_OFFSET epochs)...\"\n"
+                    "  find /workspace/logs/44k \\( -name 'G_*.pth' -o -name 'D_*.pth' \\) "
+                    "-newer /tmp/svc_session_start | while read f; do\n"
+                    "    base=$(basename \"$f\")\n"
+                    "    num=$(echo \"$base\" | sed -E 's/[GD]_([0-9]+)\\.pth/\\1/')\n"
+                    "    prefix=$(echo \"$base\" | sed -E 's/([GD])_[0-9]+\\.pth/\\1/')\n"
+                    "    new_num=$((num + RESUME_OFFSET))\n"
+                    "    mv \"$f\" \"/workspace/logs/44k/${prefix}_${new_num}.pth\" "
+                    "&& echo \"  $base -> ${prefix}_${new_num}.pth\"\n"
+                    "  done\n"
+                    f"  rm -f /workspace/logs/44k/G_{resume_offset}.pth\n"
+                    f"  rm -f /workspace/logs/44k/D_{resume_offset}.pth\n"
+                    "fi\n"
+                )
+            else:
+                rename_block = ""
+
             # Write the retry/OOM loop to a script and launch it DETACHED via
             # setsid. This way closing the app (which closes our SSH channel)
             # cannot SIGHUP the training — it lives in its own session.
@@ -533,6 +586,11 @@ class TrainingOrchestrator:
                 "#!/bin/bash\n"
                 "cd /workspace\n"
                 "pip install 'rich==13.9.4' -q 2>/dev/null\n"
+                # Mark session start AFTER any pre-existing checkpoint files
+                # so the post-training rename pass can identify which files
+                # were written by this run via `find -newer`.
+                "touch /tmp/svc_session_start\n"
+                "sleep 1\n"
                 f"{watcher_block}"
                 "FINAL_EXIT=0\n"
                 "for attempt in 1 2 3 4 5; do\n"
@@ -557,6 +615,9 @@ class TrainingOrchestrator:
                 "  sleep 5\n"
                 "done\n"
                 f"{watcher_kill}"
+                # Rename session checkpoints to reflect total epochs (no-op
+                # for non-resume runs — rename_block is empty in that case).
+                f"{rename_block}"
                 # Best-effort R2 upload BEFORE writing the .done sentinel so\n"
                 # the watching app knows when it's safe to skip the redundant\n"
                 # PHASE-5 upload and proceed straight to download.\n"
@@ -839,11 +900,10 @@ class TrainingOrchestrator:
         import json
         epoch_str = checkpoint.replace("G_", "").replace(".pth", "")
         epoch_num = int(epoch_str) if epoch_str.isdigit() else 0
-
-        if self.resume_from:
-            total_epochs = previous_epochs + epoch_num
-        else:
-            total_epochs = epoch_num
+        # Filenames are post-renamed to reflect TOTAL epochs (the runner
+        # adds the resume offset on its way out), so the checkpoint name
+        # is already the total — no need to add previous_epochs again.
+        total_epochs = epoch_num
 
         batch_size = 16
         try:
@@ -1002,13 +1062,12 @@ class TrainingOrchestrator:
                         f"Downloaded file missing or empty: {local_ckpt}"
                     )
 
-                # Build local metadata.json
+                # Build local metadata.json. Filename already reflects total
+                # epochs (runner renamed it on the pod), so don't double-add.
                 import json
-                prev_epochs = c.get("previous_epochs", 0)
-                is_resume = c.get("is_resume", False)
                 epoch_str = checkpoint_name.replace("G_", "").replace(".pth", "")
                 epoch_num = int(epoch_str) if epoch_str.isdigit() else 0
-                total_epochs = (prev_epochs + epoch_num) if is_resume else epoch_num
+                total_epochs = epoch_num
                 batch_size = 16
                 try:
                     cfg = json.loads(open(str(model_dir / "config.json")).read())
@@ -1062,13 +1121,18 @@ class TrainingOrchestrator:
         )
 
     def _wait_for_pod(self, pod_id: str, timeout: int = 300) -> tuple[str, int]:
-        """Wait for pod to become RUNNING and return (ip, ssh_port)."""
+        """Wait for pod to become RUNNING and return (ip, ssh_port).
+
+        Bails out early via _check_stopped() so a Stop click during pod
+        boot doesn't sit waiting up to 5 minutes for SSH to come up.
+        """
         start = time.time()
         while time.time() - start < timeout:
+            self._check_stopped()
             pod = self.runpod.get_pod(pod_id)
             if not pod:
                 self._log("  Pod not found, waiting...")
-                time.sleep(10)
+                self._sleep_interruptible(10)
                 continue
 
             status = pod.get("desiredStatus", "UNKNOWN")
@@ -1078,12 +1142,20 @@ class TrainingOrchestrator:
                 ip, port = self.runpod.get_pod_ssh_info(pod_id)
                 if ip and port:
                     self._log(f"  SSH available at {ip}:{port}")
-                    time.sleep(5)
+                    self._sleep_interruptible(5)
                     return ip, port
                 else:
                     self._log("  Pod running, waiting for SSH endpoint...")
             else:
                 self._log(f"  Pod status: {status}, runtime: {'ready' if runtime else 'initializing'}...")
 
-            time.sleep(10)
+            self._sleep_interruptible(10)
         raise TimeoutError(f"Pod {pod_id} did not start within {timeout}s")
+
+    def _sleep_interruptible(self, seconds: float):
+        """Sleep but wake up immediately if Stop is requested."""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if self._stop_requested:
+                return
+            time.sleep(min(0.5, deadline - time.time()))
