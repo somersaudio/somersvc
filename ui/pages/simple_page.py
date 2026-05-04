@@ -1625,13 +1625,11 @@ class _CreateModelPanel(QWidget):
         self._carousel.setFixedHeight(220)
         self._carousel.set_grade_badges_enabled(True)
         self._carousel.model_selected.connect(self._on_carousel_select)
+        # Carousel takes the full remaining width — no right spacer, since
+        # narrowing the carousel was clipping the leftmost / rightmost
+        # artist circles. The metadata panel anchors the left side; the
+        # carousel centers its own content within whatever width remains.
         carousel_row.addWidget(self._carousel, 1)
-
-        # Right-side spacer to keep the carousel visually centered against
-        # the metadata column on the left.
-        right_spacer = QLabel("")
-        right_spacer.setFixedWidth(200)
-        carousel_row.addWidget(right_spacer)
 
         layout.addLayout(carousel_row)
 
