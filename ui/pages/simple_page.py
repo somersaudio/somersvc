@@ -1518,26 +1518,28 @@ class _CreateModelPanel(QWidget):
         self._lbl_selected.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._lbl_selected)
 
-        # "+ New artist" input — small row centered below the selected name
+        # "+ New artist" input — left-aligned above the Audio Clips section
         new_artist_row = QHBoxLayout()
-        new_artist_row.addStretch()
         self._txt_new_name = QLineEdit()
         self._txt_new_name.setPlaceholderText("+ New artist")
-        self._txt_new_name.setFixedSize(140, 28)
-        self._txt_new_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._txt_new_name.setFixedSize(160, 28)
+        self._txt_new_name.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._txt_new_name.setStyleSheet("""
             QLineEdit {
                 background: rgba(255, 255, 255, 5);
                 border: 1px dashed rgba(255, 255, 255, 20);
                 border-radius: 14px;
-                color: #aaa;
+                color: #ffffff;
                 font-size: 11px;
-                padding: 0 8px;
+                padding: 0 12px;
+            }
+            QLineEdit::placeholder {
+                color: rgba(255, 255, 255, 110);
             }
             QLineEdit:focus {
-                border-color: rgba(255, 255, 255, 40);
+                border-color: rgba(255, 255, 255, 60);
                 border-style: solid;
-                color: #ccc;
+                color: #ffffff;
             }
         """)
         self._txt_new_name.returnPressed.connect(self._on_new_name_entered)
