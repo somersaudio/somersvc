@@ -1102,7 +1102,10 @@ class _ModelCarousel(QWidget):
             if opacity <= 0.01:
                 continue
 
-            painter.setOpacity(opacity)
+            # Untrained / "pending" entries render dim so the user sees the
+            # placeholder is provisional (no model yet, just a name+image).
+            is_pending_local = bool(self._models[idx].get("pending"))
+            painter.setOpacity(opacity * 0.2 if is_pending_local else opacity)
 
             is_best_local = bool(self._models[idx].get("is_best_match"))
             render_size = int(size * 1.4) if is_best_local else size
@@ -2901,7 +2904,34 @@ class _CreateModelPanel(QWidget):
         self._lbl_selected.setStyleSheet("color: rgba(255, 255, 255, 80); font-size: 12px; font-weight: bold; background: transparent;")
         self._clips = []
         self._refresh_file_list()
-        self._update_grid_selection()
+
+        # Add a temporary "pending" entry to the carousel so the user sees
+        # their new artist's placeholder (initials circle, dimmed) instead
+        # of the previously-selected artist's image. Skip if a card with
+        # the same name already exists.
+        if hasattr(self, "_carousel"):
+            existing = next(
+                (i for i, m in enumerate(self._carousel._models) if m["name"] == name),
+                None,
+            )
+            if existing is None:
+                models = list(self._carousel._models) + [{
+                    "name": name,
+                    "dir": "",
+                    "pixmap": None,
+                    "vocal_key": "",
+                    "pending": True,
+                }]
+                self._carousel.set_models(models)
+                idx = len(models) - 1
+            else:
+                idx = existing
+            self._carousel.blockSignals(True)
+            try:
+                self._carousel.select(idx)
+            finally:
+                self._carousel.blockSignals(False)
+
         self._btn_continue_train.setVisible(False)
         self._btn_delete_model.setVisible(False)
         self._lbl_model_info.setVisible(False)
@@ -3076,11 +3106,20 @@ class _CreateModelPanel(QWidget):
                 except Exception:
                     pass
 
+            # An entry is "pending" if no trained checkpoint exists yet —
+            # the carousel renders these at 20% opacity to signal "name
+            # reserved, model not trained yet".
+            artist_dir = os.path.join(models_dir, name)
+            has_checkpoint = os.path.isdir(artist_dir) and any(
+                f.endswith(".pth") for f in os.listdir(artist_dir)
+            )
+
             models.append({
                 "name": name,
-                "dir": os.path.join(models_dir, name),
+                "dir": artist_dir,
                 "pixmap": pixmap,
                 "vocal_key": vocal_key,
+                "pending": not has_checkpoint,
             })
 
         self._carousel.set_models(models)
