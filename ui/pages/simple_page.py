@@ -2850,6 +2850,44 @@ class _CreateModelPanel(QWidget):
         """Carousel-era replacement: just rebuild the carousel from disk."""
         self._populate_existing_datasets()
 
+    def _estimate_training_time_a40(
+        self, total_epochs: int, current_epochs: int, clips: int,
+        is_resume: bool = False,
+    ) -> str:
+        """Rough A40 wall-clock estimate as a human string ("~42 min", "~1h 30min").
+
+        Math (calibrated against observed runs):
+        - Per-epoch time on A40 ≈ batches_per_epoch × ~2 s (with batch=96)
+        - Checkpoint saves every 25 epochs cost ~3 s each
+        - Pod boot + deps install for fresh runs adds ~6 min
+        - Resume reuses an existing pod context if any, but a new pod still
+          needs the same boot + dep install on first launch, so we bake in
+          the same overhead either way.
+        """
+        import math
+        delta = max(0, total_epochs - max(current_epochs, 0))
+        if delta <= 0:
+            return ""
+        batches_per_epoch = max(1, math.ceil(max(clips, 1) / 96))
+        sec_per_batch = 2.0
+        train_sec = delta * batches_per_epoch * sec_per_batch
+        save_sec = (delta / 25) * 3
+        # Pod-boot + dep install + final download: ~6 min always
+        overhead_sec = 6 * 60
+        total_sec = train_sec + save_sec + overhead_sec
+        return self._format_duration_minutes(total_sec)
+
+    @staticmethod
+    def _format_duration_minutes(seconds: float) -> str:
+        m = int(seconds / 60)
+        if m < 1:
+            return "<1 min"
+        if m < 60:
+            return f"~{m} min"
+        h = m // 60
+        rem = m % 60
+        return f"~{h}h {rem}min" if rem else f"~{h}h"
+
     def _load_model_metadata(self, name: str) -> dict:
         """Load metadata.json for a model, or build a minimal one from disk."""
         from services.paths import MODELS_DIR
@@ -3163,8 +3201,13 @@ class _CreateModelPanel(QWidget):
                 if clips > 0 else 0
             )
             target_epochs = max(epochs + max(extra_epochs, 100), epochs + 100)
+            eta = self._estimate_training_time_a40(
+                target_epochs, current_epochs=epochs, clips=clips, is_resume=True,
+            )
             rec = (
-                f"Continue training to ~{target_epochs} epochs for noticeably better quality."
+                f"Continue training to ~{target_epochs} epochs"
+                f"{(' (' + eta + ' on A40)') if eta else ''}"
+                f" for noticeably better quality."
             )
             rec_color = "rgba(85, 153, 255, 220)"
         else:
@@ -3717,18 +3760,36 @@ class _CreateModelPanel(QWidget):
                         pass
                 # Show the calculated value in the epochs field
                 self._txt_epochs.setText(str(self._recommended_epochs))
-            # Print the target so users can confirm what auto picked.
+            # Print the target + an A40 wall-clock estimate so the user
+            # knows roughly how long the run will take.
+            current_ep_for_est = 0
+            if resume and resume_from:
+                try:
+                    import re as _re
+                    _m = _re.search(r'G_(\d+)\.pth', os.path.basename(resume_from))
+                    if _m:
+                        current_ep_for_est = int(_m.group(1))
+                except Exception:
+                    pass
+            eta = self._estimate_training_time_a40(
+                self._recommended_epochs,
+                current_epochs=current_ep_for_est,
+                clips=len(self._clips),
+                is_resume=resume,
+            )
             try:
                 import soundfile as _sf
                 total_dur_log = sum(_sf.info(p).duration for p in self._clips)
                 m, s = divmod(int(total_dur_log), 60)
                 self._log.append_line(
                     f"Target: {self._recommended_epochs} epochs "
-                    f"(dataset duration: {m}:{s:02d}) — training will auto-stop here."
+                    f"(dataset duration: {m}:{s:02d}, est. {eta} on A40) — "
+                    f"training will auto-stop here."
                 )
             except Exception:
                 self._log.append_line(
-                    f"Target: {self._recommended_epochs} epochs — training will auto-stop here."
+                    f"Target: {self._recommended_epochs} epochs "
+                    f"(est. {eta} on A40) — training will auto-stop here."
                 )
             self._current_epoch = 0
             self._worker.finished_ok.connect(self._on_train_done)
