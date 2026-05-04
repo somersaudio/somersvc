@@ -31,8 +31,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setMinimumSize(900, 650)
-        self.resize(1050, 820)
+        self.setMinimumSize(900, 700)
+        self.resize(1050, 870)
         self._drag_pos = None
 
         # Window control buttons (macOS traffic light style)

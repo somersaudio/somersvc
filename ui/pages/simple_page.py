@@ -1779,7 +1779,9 @@ class _CreateModelPanel(QWidget):
         layout.addStretch()
 
         # Bottom-left model summary — shows duration trained on, epoch count,
-        # and a one-line suggestion (more data vs more epochs)
+        # and a one-line suggestion (more data vs more epochs).
+        # Wrap in a row with a leading spacer so it sits clear of the
+        # version label that sits in the corner of the simple container.
         self._lbl_model_info = QLabel("")
         self._lbl_model_info.setStyleSheet(
             "color: rgba(255, 255, 255, 75); font-size: 11px; "
@@ -1789,7 +1791,12 @@ class _CreateModelPanel(QWidget):
         self._lbl_model_info.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._lbl_model_info.setVisible(False)
         self._lbl_model_info.setMaximumWidth(420)
-        layout.addWidget(self._lbl_model_info, alignment=Qt.AlignmentFlag.AlignLeft)
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.addSpacing(60)  # clear the version label in the corner
+        info_row.addWidget(self._lbl_model_info)
+        info_row.addStretch()
+        layout.addLayout(info_row)
 
         # State
         self._clips = []
