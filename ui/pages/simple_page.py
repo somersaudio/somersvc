@@ -897,17 +897,18 @@ class _ModelCarousel(QWidget):
                         QToolTip.showText(
                             event.globalPos(),
                             "Vocal key not detected yet.\n\n"
-                            "It populates after training. The trainer scans the\n"
-                            "artist's audio to find their median pitch, which the\n"
-                            "app then uses to recommend transposes that keep\n"
-                            "your songs in the artist's natural range.",
+                            "It populates automatically after training, when the\n"
+                            "trainer scans the artist's audio to find their median\n"
+                            "pitch. The app then uses that key to recommend\n"
+                            "transposes that keep your songs in the artist's range.\n\n"
+                            "Click to estimate it now from Spotify + GetSongBPM\n"
+                            "(no training data required).",
                             self,
                         )
                     else:
                         QToolTip.showText(
                             event.globalPos(),
-                            f"Detected vocal key: {key}\n"
-                            "Click to manually adjust if it sounds off.",
+                            f"Detected vocal key: {key}",
                             self,
                         )
                     return True
