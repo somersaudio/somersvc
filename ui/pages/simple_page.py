@@ -995,11 +995,13 @@ class _ModelCarousel(QWidget):
         cx = self.width() / 2.0
         positions = {}
 
-        # Pre-calculate all sizes
+        # Pre-calculate all sizes. Per-instance cap so a narrower carousel
+        # (e.g. with a metadata panel beside it) can render fewer items.
         items = []
+        max_dist = getattr(self, "_max_visible_dist", 6)
         for i in range(len(self._models)):
             dist = abs(i - self._anim_pos)
-            if dist > 6:
+            if dist > max_dist:
                 continue
             size = self._size_for_dist(dist)
             items.append((i, dist, size))
@@ -1628,12 +1630,18 @@ class _CreateModelPanel(QWidget):
         self._carousel = _ModelCarousel()
         self._carousel.setFixedHeight(220)
         self._carousel.set_grade_badges_enabled(True)
+        # Narrower fan-out so a matching right spacer can true-center the
+        # carousel without clipping leading / trailing artists. dist=3
+        # fits inside the resulting 672px width.
+        self._carousel._max_visible_dist = 3
         self._carousel.model_selected.connect(self._on_carousel_select)
-        # Carousel takes the full remaining width — no right spacer, since
-        # narrowing the carousel was clipping the leftmost / rightmost
-        # artist circles. The metadata panel anchors the left side; the
-        # carousel centers its own content within whatever width remains.
         carousel_row.addWidget(self._carousel, 1)
+
+        # Mirror-width invisible spacer so the carousel sits exactly
+        # centered on the page rather than offset by the metadata panel.
+        right_spacer = QLabel("")
+        right_spacer.setFixedWidth(200)
+        carousel_row.addWidget(right_spacer)
 
         layout.addLayout(carousel_row)
 
