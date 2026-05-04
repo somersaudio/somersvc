@@ -2860,12 +2860,21 @@ class _CreateModelPanel(QWidget):
         self._lbl_model_info.setVisible(True)
 
     def _update_grid_selection(self):
-        """Move the carousel to the currently-selected name (no-op if absent)."""
+        """Move the carousel to the currently-selected name (no-op if absent).
+
+        Uses blockSignals so the call doesn't re-emit model_selected and
+        re-enter _on_carousel_select → _select_model → here → ... (infinite
+        recursion → SIGABRT)."""
         if not getattr(self, "_carousel", None):
             return
         for i, m in enumerate(self._carousel._models):
             if m["name"] == self._selected_name:
-                self._carousel.select(i)
+                if i != getattr(self._carousel, "_selected", -1):
+                    self._carousel.blockSignals(True)
+                    try:
+                        self._carousel.select(i)
+                    finally:
+                        self._carousel.blockSignals(False)
                 return
 
     def _populate_existing_datasets(self):
@@ -2915,11 +2924,16 @@ class _CreateModelPanel(QWidget):
             })
 
         self._carousel.set_models(models)
-        # Restore the previously-selected artist if it still exists
+        # Restore the previously-selected artist if it still exists.
+        # blockSignals so we don't bounce back through _on_carousel_select.
         if self._selected_name:
             for i, m in enumerate(models):
                 if m["name"] == self._selected_name:
-                    self._carousel.select(i)
+                    self._carousel.blockSignals(True)
+                    try:
+                        self._carousel.select(i)
+                    finally:
+                        self._carousel.blockSignals(False)
                     break
         self._txt_new_name.clear()
 
