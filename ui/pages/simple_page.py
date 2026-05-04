@@ -1359,6 +1359,13 @@ class _CreateModelPanel(QWidget):
         self._bg_cache = None
         self._bg_cache_size = None
         self._init_ui()
+        # Default wallpaper before the user selects anyone — same as the
+        # front page's Best Match background.
+        best_bg = os.path.join(APP_DIR, "assets", "best_match.png")
+        if os.path.exists(best_bg):
+            pix = QPixmap(best_bg)
+            if not pix.isNull():
+                self._bg_pixmap = pix
 
     def _build_bg_cache(self):
         """Pre-composite the artist photo with gradient fades."""
@@ -1421,7 +1428,12 @@ class _CreateModelPanel(QWidget):
         self._bg_cache = None
 
     def _update_panel_background(self, name: str):
-        """Swap the artist photo behind the panel based on the selected model."""
+        """Swap the artist photo behind the panel based on the selected model.
+
+        Falls back to assets/best_match.png — the same wallpaper the front
+        page uses when "Best Match" is selected — when no specific artist
+        image is available.
+        """
         from services.paths import MODELS_DIR
         self._bg_pixmap = None
         if name:
@@ -1439,6 +1451,12 @@ class _CreateModelPanel(QWidget):
                     if not pix.isNull():
                         self._bg_pixmap = pix
                         break
+        if self._bg_pixmap is None or self._bg_pixmap.isNull():
+            best_bg = os.path.join(APP_DIR, "assets", "best_match.png")
+            if os.path.exists(best_bg):
+                pix = QPixmap(best_bg)
+                if not pix.isNull():
+                    self._bg_pixmap = pix
         self._bg_cache = None
         self.update()
 
