@@ -1979,6 +1979,13 @@ class _CreateModelPanel(QWidget):
     def _add_clips(self, paths):
         self._clips.extend(paths)
         self._refresh_file_list()
+        # Persist staged clips for pending (untrained, no dataset on disk)
+        # artists so closing the Create panel and reopening it doesn't lose
+        # the work.
+        from services.paths import DATASETS_DIR
+        name = (self._selected_name or "").strip()
+        if name and not os.path.isdir(os.path.join(str(DATASETS_DIR), name)):
+            self._pending_clips_by_artist[name] = list(self._clips)
 
     def _trained_files_path(self, name: str) -> str:
         """Path to the per-model JSON snapshot of trained-on filenames."""
@@ -3218,6 +3225,11 @@ class _CreateModelPanel(QWidget):
             for name in os.listdir(ds_dir):
                 if os.path.isdir(os.path.join(ds_dir, name)):
                     names.add(name)
+        # Include in-memory pending artists (typed names with staged clips
+        # but no folder on disk yet) so they survive panel close/reopen.
+        for n in getattr(self, "_pending_clips_by_artist", {}).keys():
+            if n:
+                names.add(n)
 
         models = []
         for name in sorted(names, key=str.casefold):
