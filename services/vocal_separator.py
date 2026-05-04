@@ -1,6 +1,7 @@
 """Vocal separator using Demucs (Meta) for isolating vocals from music."""
 
 import os
+import sys
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -37,9 +38,13 @@ class VocalSeparator:
         env = os.environ.copy()
         env["PYTHONWARNINGS"] = "ignore"
 
-        # Use htdemucs (best quality model)
-        cmd = [
-            "python", "-m", "demucs",
+        # In the bundled .app, sys.executable is SomerSVC (not python). Re-exec
+        # ourselves with --demucs-mode so main.py can hand off to demucs.
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--demucs-mode"]
+        else:
+            cmd = [sys.executable, "-m", "demucs"]
+        cmd += [
             "--two-stems", "vocals",  # only split into vocals + no_vocals
             "-n", "htdemucs",
             "-o", output_dir,

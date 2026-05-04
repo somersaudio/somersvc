@@ -89,6 +89,13 @@ def main():
         cli()
         return
 
+    # Same trick for demucs (vocal isolation) — the bundled .app has no
+    # standalone `python` to run `python -m demucs`, so we re-exec ourselves.
+    if len(sys.argv) > 1 and sys.argv[1] == "--demucs-mode":
+        from demucs.separate import main as demucs_main
+        demucs_main(sys.argv[2:])
+        return
+
     auto_update()
 
     app = QApplication(sys.argv)

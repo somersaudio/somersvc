@@ -2855,36 +2855,63 @@ class _CreateModelPanel(QWidget):
         )
         if not paths:
             return
-        self._lbl_status.setText("Isolating vocals...")
-        # Run in background
+        self._lbl_status.setText("Isolating vocals... (downloading model on first run, can take 1-2 min)")
+        self._lbl_status.setStyleSheet(
+            "color: rgba(255, 255, 255, 75); font-size: 11px; background: transparent;"
+        )
         from services.vocal_separator import VocalSeparator
         import tempfile
         self._iso_dir = tempfile.mkdtemp(prefix="svc_iso_")
 
         class _IsoWorker(QThread):
-            finished = pyqtSignal(list)
+            progress = pyqtSignal(str)
+            finished_with = pyqtSignal(list, list)  # vocals_paths, errors
+
             def __init__(self, paths, out_dir):
                 super().__init__()
                 self.paths, self.out_dir = paths, out_dir
+
             def run(self):
                 sep = VocalSeparator()
                 vocals = []
-                for p in self.paths:
+                errors = []
+                total = len(self.paths)
+                for i, p in enumerate(self.paths, 1):
+                    self.progress.emit(f"Isolating {i}/{total}: {os.path.basename(p)}")
                     try:
-                        stems = sep.separate(p, self.out_dir)
+                        stems = sep.separate(
+                            p, self.out_dir,
+                            on_log=lambda line: self.progress.emit(line),
+                        )
                         vocals.append(stems["vocals"])
-                    except Exception:
-                        pass
-                self.finished.emit(vocals)
+                    except Exception as e:
+                        errors.append(f"{os.path.basename(p)}: {e}")
+                self.finished_with.emit(vocals, errors)
 
         self._iso_worker = _IsoWorker(paths, self._iso_dir)
-        self._iso_worker.finished.connect(self._on_iso_done)
+        self._iso_worker.progress.connect(
+            lambda msg: self._lbl_status.setText(msg[:120])
+        )
+        self._iso_worker.finished_with.connect(self._on_iso_done)
         self._iso_worker.start()
 
-    def _on_iso_done(self, vocals):
-        self._lbl_status.setText("")
+    def _on_iso_done(self, vocals, errors):
         if vocals:
             self._add_clips(vocals)
+            self._lbl_status.setText(f"Isolated vocals from {len(vocals)} song(s).")
+            self._lbl_status.setStyleSheet(
+                "color: rgba(80, 200, 120, 150); font-size: 11px; background: transparent;"
+            )
+        if errors:
+            QMessageBox.warning(
+                self, "Vocal Isolation Failed",
+                "Some songs couldn't be processed:\n\n" + "\n".join(errors[:5]),
+            )
+            if not vocals:
+                self._lbl_status.setText("Vocal isolation failed — see error.")
+                self._lbl_status.setStyleSheet(
+                    "color: rgba(255, 100, 100, 150); font-size: 11px; background: transparent;"
+                )
 
     def _start_training(self, resume=False):
         name = self._selected_name.strip()
