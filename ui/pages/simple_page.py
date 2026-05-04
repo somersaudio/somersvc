@@ -3964,6 +3964,14 @@ class _CreateModelPanel(QWidget):
                 update_job(job_id, recommended_epochs=int(self._recommended_epochs))
             except Exception:
                 pass
+            # Push the target into the worker BEFORE start so the orchestrator
+            # bakes it into the pod's config and runs the auto-stop watcher.
+            # Without this, training would run forever if the user closes the
+            # app — the UI auto-stop is gone.
+            try:
+                self._worker.target_epochs = int(self._recommended_epochs)
+            except Exception:
+                pass
             self._worker.finished_ok.connect(self._on_train_done)
             self._worker.error.connect(self._on_train_error)
             self._progress_bar.setValue(0)
@@ -4646,13 +4654,19 @@ class SimplePage(QWidget):
 
                 self._cmb_model.addItem(name, model_dir)
 
-                # Load image
+                # Load image — prefer model-dir image, fall back to the
+                # Spotify-fetched artist thumbnail cache so newly trained
+                # models pick up the photo the Create panel already cached.
                 pixmap = None
                 for ext in [".jpg", ".jpeg", ".png", ".webp"]:
                     p = os.path.join(model_dir, f"image{ext}")
                     if os.path.exists(p):
                         pixmap = QPixmap(p)
                         break
+                if pixmap is None or pixmap.isNull():
+                    thumb = os.path.join(CACHE_DIR, "artist_thumbs", f"{name}.jpg")
+                    if os.path.exists(thumb):
+                        pixmap = QPixmap(thumb)
 
                 # Load vocal key from metadata
                 vocal_key = ""

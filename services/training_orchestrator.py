@@ -24,6 +24,7 @@ class TrainingOrchestrator:
         on_status: Callable[[str], None] | None = None,
         on_progress: Callable[[int], None] | None = None,
         resume_from: str = "",  # path to existing model checkpoint to resume from
+        target_epochs: int = 0,  # auto-stop target — pod stops here even if app closes
     ):
         self.runpod = RunPodClient(api_key)
         self.ssh_key_path = ssh_key_path
@@ -34,6 +35,7 @@ class TrainingOrchestrator:
         self.on_status = on_status or (lambda _: None)
         self.on_progress = on_progress or (lambda _: None)
         self.resume_from = resume_from
+        self.target_epochs = int(target_epochs or 0)
         self._stop_requested = False
         self._pod_ip = None
         self._pod_port = None
@@ -335,9 +337,11 @@ class TrainingOrchestrator:
 
             # --- OPTIMIZATION 1: Increase batch size ---
             self._log("Optimizing training config for max speed...")
+            target_epochs_for_pod = int(self.target_epochs or 0)
             ssh.exec_command(
                 "cat > /tmp/optimize.py << 'OPTEOF'\n"
                 "import json, glob, subprocess\n"
+                f"TARGET_EPOCHS = {target_epochs_for_pod}\n"
                 "try:\n"
                 "    out = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits']).decode().strip()\n"
                 "    vram_mb = int(out.split(chr(10))[0])\n"
@@ -371,9 +375,14 @@ class TrainingOrchestrator:
                 "    # checkpoint, big batches → spaced out so we don't spam disk.\n"
                 "    eval_int = max(1, min(25, target_batch // 16))\n"
                 "    cfg['train']['eval_interval'] = eval_int\n"
+                "    # Bake the auto-stop target into the trainer's max-epoch so\n"
+                "    # the pod stops at target even if the app is closed and the\n"
+                "    # UI's auto-stop never fires.\n"
+                "    if TARGET_EPOCHS > 0:\n"
+                "        cfg['train']['epochs'] = TARGET_EPOCHS\n"
                 "    with open(cfg_path, 'w') as f:\n"
                 "        json.dump(cfg, f, indent=2)\n"
-                "    print(f'VRAM: {vram_mb}MB | Batch: {original_batch} -> {target_batch} | LR: {original_lr} -> {new_lr:.6f} | eval_interval: {eval_int}')\n"
+                "    print(f'VRAM: {vram_mb}MB | Batch: {original_batch} -> {target_batch} | LR: {original_lr} -> {new_lr:.6f} | eval_interval: {eval_int} | epochs: {cfg[\"train\"].get(\"epochs\", \"default\")}')\n"
                 "OPTEOF\n"
                 "python3 /tmp/optimize.py",
                 on_stdout=self._log,
@@ -484,6 +493,37 @@ class TrainingOrchestrator:
                     "echo 'R2 not configured — model stays on pod for direct SSH download.'\n"
                 )
 
+            # Auto-stop watcher block: independent of Lightning's max_epochs,
+            # this polls G_*.pth filenames and SIGTERMs svc train when the
+            # latest checkpoint epoch hits target. Belt + suspenders to the
+            # cfg.train.epochs cap.
+            target_for_watcher = int(self.target_epochs or 0)
+            if target_for_watcher > 0:
+                watcher_block = (
+                    f"TRAIN_TARGET={target_for_watcher}\n"
+                    "(\n"
+                    "  sleep 30\n"
+                    "  while [ ! -f /tmp/svc_train_runner.done ]; do\n"
+                    "    if [ -d /workspace/logs/44k ]; then\n"
+                    "      latest=$(ls /workspace/logs/44k/G_*.pth 2>/dev/null "
+                    "| sed -E 's@.*G_([0-9]+)\\.pth@\\1@' | sort -n | tail -1)\n"
+                    "      if [ -n \"$latest\" ] && [ \"$latest\" -ge \"$TRAIN_TARGET\" ]; then\n"
+                    "        echo \"Auto-stop watcher: epoch $latest reached target $TRAIN_TARGET — stopping.\"\n"
+                    "        touch /tmp/somersvc_stop\n"
+                    "        pkill -SIGTERM -f 'svc train' 2>/dev/null\n"
+                    "        break\n"
+                    "      fi\n"
+                    "    fi\n"
+                    "    sleep 15\n"
+                    "  done\n"
+                    ") &\n"
+                    "WATCHER_PID=$!\n"
+                )
+                watcher_kill = "kill $WATCHER_PID 2>/dev/null\n"
+            else:
+                watcher_block = ""
+                watcher_kill = ""
+
             # Write the retry/OOM loop to a script and launch it DETACHED via
             # setsid. This way closing the app (which closes our SSH channel)
             # cannot SIGHUP the training — it lives in its own session.
@@ -493,6 +533,7 @@ class TrainingOrchestrator:
                 "#!/bin/bash\n"
                 "cd /workspace\n"
                 "pip install 'rich==13.9.4' -q 2>/dev/null\n"
+                f"{watcher_block}"
                 "FINAL_EXIT=0\n"
                 "for attempt in 1 2 3 4 5; do\n"
                 "  if [ -f /tmp/somersvc_stop ]; then\n"
@@ -515,6 +556,7 @@ class TrainingOrchestrator:
                 "  echo \"Training crashed (exit $EXIT), restarting in 5s...\"\n"
                 "  sleep 5\n"
                 "done\n"
+                f"{watcher_kill}"
                 # Best-effort R2 upload BEFORE writing the .done sentinel so\n"
                 # the watching app knows when it's safe to skip the redundant\n"
                 # PHASE-5 upload and proceed straight to download.\n"

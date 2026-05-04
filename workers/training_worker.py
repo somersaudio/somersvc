@@ -23,6 +23,7 @@ class TrainingWorker(QThread):
         models_dir: str,
         f0_method: str = "dio",
         resume_from: str = "",
+        target_epochs: int = 0,
     ):
         super().__init__()
         self.job_id = job_id
@@ -33,6 +34,7 @@ class TrainingWorker(QThread):
         self.models_dir = models_dir
         self.f0_method = f0_method
         self.resume_from = resume_from
+        self.target_epochs = int(target_epochs or 0)
         self._orchestrator: TrainingOrchestrator | None = None
 
     def run(self):
@@ -46,6 +48,7 @@ class TrainingWorker(QThread):
                 on_status=self.status_changed.emit,
                 on_progress=self.progress.emit,
                 resume_from=self.resume_from,
+                target_epochs=self.target_epochs,
             )
             self._orchestrator.run(self.job_id, self.speaker_name, self.f0_method)
             self.finished_ok.emit(self.job_id)
