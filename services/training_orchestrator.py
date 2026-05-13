@@ -225,16 +225,26 @@ class TrainingOrchestrator:
             self._log("Checking for existing installation...")
             self._svc_available = False
             ssh.exec_command(
-                "which svc > /dev/null 2>&1 && python3 -c 'import so_vits_svc_fork' 2>/dev/null && echo SVC_OK || echo SVC_MISSING",
+                # Require a 4.1.x install — 4.2.x bumped its dep mins past
+                # what the pod's torch image provides, and a broken cached
+                # pod (svc importable but unusable) would otherwise skip
+                # the downgrade reinstall.
+                "which svc > /dev/null 2>&1 && python3 -c 'import so_vits_svc_fork as s; v = getattr(s, \"__version__\", \"0\"); exit(0 if v.startswith(\"4.1.\") else 1)' 2>/dev/null && echo SVC_OK || echo SVC_MISSING",
                 on_stdout=lambda line: setattr(self, '_svc_available', 'SVC_OK' in line),
             )
 
             if self._svc_available:
                 self._log("so-vits-svc-fork already installed — skipping!")
             else:
+                # Pin to the last 4.1.x line: 4.2.x bumped its minimum
+                # deps to torch>=2.8 / lightning>=2.5 / numpy>=2 which
+                # don't match the pod's PyTorch 2.1.0+cu118 image, so
+                # installing the unpinned latest leaves training in a
+                # silently broken state. 4.1.x works with our pinned
+                # numpy<2 + lightning<2.5 stack.
                 self._log("Installing so-vits-svc-fork (keeping existing PyTorch)...")
                 exit_code = ssh.exec_command(
-                    "pip install so-vits-svc-fork --no-deps && "
+                    "pip install 'so-vits-svc-fork<4.2' --no-deps && "
                     "pip install cm-time click fastapi librosa 'lightning<2.5' matplotlib "
                     "pebble praat-parselmouth psutil pysimplegui-4-foss pyworld "
                     "requests rich scipy sounddevice soundfile tensorboard "
