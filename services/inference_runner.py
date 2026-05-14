@@ -98,8 +98,13 @@ class InferenceRunner:
             env=env,
         )
 
+        # Capture the FULL unfiltered subprocess output to a debug log so we
+        # can see the actual traceback when inference fails. The on-screen
+        # log still gets the SUPPRESS-filtered stream so the UI stays clean.
+        full_lines = []
         for line in iter(process.stdout.readline, ""):
             stripped = line.rstrip("\n")
+            full_lines.append(stripped)
             if any(s in stripped for s in SUPPRESS):
                 continue
             if not stripped.strip():
@@ -109,13 +114,43 @@ class InferenceRunner:
         process.wait()
 
         if process.returncode != 0:
-            raise RuntimeError(f"Inference failed with exit code {process.returncode}")
+            # Persist the entire subprocess output so the user can send us
+            # the real error. Also include the tail in the error message
+            # so the dialog itself shows something useful.
+            debug_path = self._write_debug_log(full_lines, "infer")
+            tail = "\n".join(full_lines[-25:]) if full_lines else "(no output captured)"
+            raise RuntimeError(
+                f"Inference failed with exit code {process.returncode}.\n\n"
+                f"Last output:\n{tail}\n\n"
+                f"Full log saved to: {debug_path}"
+            )
 
         if not os.path.exists(output_path):
-            raise RuntimeError(f"Output file not created: {output_path}")
+            debug_path = self._write_debug_log(full_lines, "infer-no-output")
+            raise RuntimeError(
+                f"Output file not created: {output_path}\n\n"
+                f"Full log saved to: {debug_path}"
+            )
 
         log(f"Output saved: {output_path}")
         return output_path
+
+    @staticmethod
+    def _write_debug_log(lines: list, prefix: str) -> str:
+        """Dump full subprocess output to ~/.somersvc/output/debug/ so the
+        user can attach it when reporting the failure."""
+        try:
+            from services.paths import OUTPUT_DIR
+            import datetime
+            debug_dir = os.path.join(str(OUTPUT_DIR), "debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            path = os.path.join(debug_dir, f"{prefix}-{stamp}.log")
+            with open(path, "w") as f:
+                f.write("\n".join(lines))
+            return path
+        except Exception:
+            return "(could not save debug log)"
 
     @staticmethod
     def _generate_default_config(config_path: str):
