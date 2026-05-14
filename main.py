@@ -89,11 +89,48 @@ def auto_update():
         pass  # No git, no internet, or not a git repo — skip silently
 
 
+def _hide_subprocess_from_dock():
+    """When the bundled .app re-execs itself as a subprocess (--svc-mode /
+    --demucs-mode), macOS' LaunchServices treats it as a fresh launch and
+    pops a second Dock icon + can spawn a duplicate GUI window. Calling
+    NSApplication.setActivationPolicy_(Prohibited) before anything else
+    tells macOS we're a background tool, so no Dock icon and no second
+    window. ctypes path so we don't need PyObjC bundled."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        appkit = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/AppKit.framework/AppKit"
+        )  # noqa: F841  (must be loaded so NSApplication symbol resolves)
+        objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.dylib")
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        # First call: 2 args (cls, sel)
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        NSApplication = objc.objc_getClass(b"NSApplication")
+        shared = objc.objc_msgSend(
+            NSApplication, objc.sel_registerName(b"sharedApplication")
+        )
+        # Second call: 3 args (instance, sel, NSInteger policy)
+        objc.objc_msgSend.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long
+        ]
+        # NSApplicationActivationPolicyProhibited == 2
+        objc.objc_msgSend(
+            shared, objc.sel_registerName(b"setActivationPolicy:"), 2
+        )
+    except Exception:
+        pass
+
+
 def main():
     # When the realtime feature re-execs us with --svc-mode, hand off to
     # the so-vits-svc-fork CLI instead of starting the GUI. This lets the
     # bundled .app act as its own `svc` binary.
     if len(sys.argv) > 1 and sys.argv[1] == "--svc-mode":
+        _hide_subprocess_from_dock()
         # NumPy 2.x removed binary-mode np.fromstring; svc-fork's
         # plot_spectrogram_to_numpy still uses it. Monkey-patch so
         # validation doesn't crash. Idempotent.
@@ -118,6 +155,7 @@ def main():
     # Same trick for demucs (vocal isolation) — the bundled .app has no
     # standalone `python` to run `python -m demucs`, so we re-exec ourselves.
     if len(sys.argv) > 1 and sys.argv[1] == "--demucs-mode":
+        _hide_subprocess_from_dock()
         from demucs.separate import main as demucs_main
         demucs_main(sys.argv[2:])
         return
