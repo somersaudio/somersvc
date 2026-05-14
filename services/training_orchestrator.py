@@ -311,10 +311,15 @@ class TrainingOrchestrator:
             update_job(job_id, status="uploading")
             ssh.exec_command("mkdir -p /workspace")
 
+            # Cancel hook for paramiko's progress callback — fires roughly
+            # every 32KB, so Stop during upload aborts within a chunk
+            # instead of waiting on a TCP timeout.
+            cancel = lambda: self._stop_requested
+
             if use_local_preprocess and preprocessed_tar:
                 # Upload preprocessed data — skip preprocessing on pod entirely
                 self._log("Uploading preprocessed data (skipping pod preprocessing)...")
-                ssh.upload_file(preprocessed_tar, "/workspace/preprocessed.tar.gz")
+                ssh.upload_file(preprocessed_tar, "/workspace/preprocessed.tar.gz", cancel_check=cancel)
                 ssh.exec_command("cd /workspace && tar xzf preprocessed.tar.gz && rm preprocessed.tar.gz")
                 self._log("Preprocessed data uploaded!")
                 # Clean up local temp files
@@ -322,7 +327,7 @@ class TrainingOrchestrator:
                 os.unlink(dataset_tar)
             else:
                 # Upload raw dataset and preprocess on pod
-                ssh.upload_file(dataset_tar, "/workspace/dataset.tar.gz")
+                ssh.upload_file(dataset_tar, "/workspace/dataset.tar.gz", cancel_check=cancel)
                 ssh.exec_command("cd /workspace && tar xzf dataset.tar.gz && rm dataset.tar.gz")
                 self._log("Dataset uploaded and extracted")
                 os.unlink(dataset_tar)
@@ -365,18 +370,18 @@ class TrainingOrchestrator:
                 resume_file = os.path.basename(self.resume_from)
                 self._log(f"Uploading checkpoint for resume: {resume_file}")
                 ssh.exec_command("mkdir -p /workspace/logs/44k")
-                ssh.upload_file(self.resume_from, f"/workspace/logs/44k/{resume_file}")
+                ssh.upload_file(self.resume_from, f"/workspace/logs/44k/{resume_file}", cancel_check=cancel)
                 # Also upload D checkpoint if it exists
                 d_file = resume_file.replace("G_", "D_")
                 d_path = os.path.join(resume_dir, d_file)
                 if os.path.exists(d_path):
-                    ssh.upload_file(d_path, f"/workspace/logs/44k/{d_file}")
+                    ssh.upload_file(d_path, f"/workspace/logs/44k/{d_file}", cancel_check=cancel)
                     self._log(f"Uploaded discriminator checkpoint: {d_file}")
                 # Upload config if it exists in the model dir
                 config_path = os.path.join(resume_dir, "config.json")
                 if os.path.exists(config_path):
                     ssh.exec_command("mkdir -p /workspace/configs/44k")
-                    ssh.upload_file(config_path, "/workspace/configs/44k/config.json")
+                    ssh.upload_file(config_path, "/workspace/configs/44k/config.json", cancel_check=cancel)
 
                 # Capture the resume epoch from the filename. The trainer
                 # itself starts at 0 — we no longer try to patch its epoch

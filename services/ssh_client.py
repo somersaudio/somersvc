@@ -26,6 +26,13 @@ class SSHClient:
             pkey=pkey,
             timeout=30,
         )
+        # Backstop for the rare case where cancel_check can't fire (SFTP
+        # send buffer full while the pod is dying). Keepalive every 15s
+        # → paramiko tears down the transport within ~45s instead of
+        # waiting for the OS TCP timeout (60-120s on macOS).
+        transport = self._client.get_transport()
+        if transport is not None:
+            transport.set_keepalive(15)
         self._sftp = self._client.open_sftp()
 
     def exec_command(
@@ -56,11 +63,18 @@ class SSHClient:
         local_path: str,
         remote_path: str,
         progress_cb: Callable[[int, int], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ):
         if not self._sftp:
             raise RuntimeError("Not connected")
 
+        # paramiko fires `callback` after each 32KB chunk. Raising from
+        # inside the callback unwinds the transfer immediately, which is
+        # how we get a near-instant Stop during upload instead of waiting
+        # for the TCP socket to time out on a terminated pod.
         def _progress(transferred: int, total: int):
+            if cancel_check and cancel_check():
+                raise RuntimeError("stopped")
             if progress_cb:
                 progress_cb(transferred, total)
 
@@ -71,6 +85,7 @@ class SSHClient:
         remote_path: str,
         local_path: str,
         progress_cb: Callable[[int, int], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ):
         if not self._sftp:
             raise RuntimeError("Not connected")
@@ -78,6 +93,8 @@ class SSHClient:
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
         def _progress(transferred: int, total: int):
+            if cancel_check and cancel_check():
+                raise RuntimeError("stopped")
             if progress_cb:
                 progress_cb(transferred, total)
 
