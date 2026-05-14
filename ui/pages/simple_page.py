@@ -6169,7 +6169,12 @@ class SimplePage(QWidget):
 
     def _on_finished(self, output_path):
         self._hide_spinner()
-        self._convert_ring.set_converting(False)
+        # Pulse the ring to 100% so the user sees a clear "done" beat
+        # before it resets. Chunk-counting caps progress at 95%, and
+        # set_converting(False) clears the ring instantly, so without
+        # this the bar appears to hang at 95% and then vanish.
+        self._convert_ring.set_progress(1.0)
+        QTimer.singleShot(500, lambda: self._convert_ring.set_converting(False))
         self._waveform.set_active_section(-1)
         self._waveform.set_progress(0.0)
         self._log.append_line(f"Done!")

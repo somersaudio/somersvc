@@ -98,7 +98,7 @@ class InferenceWorker(QThread):
 
     def _run_svc(self, source: str, log, output_dir: str = "") -> str:
         runner = InferenceRunner()
-        return runner.run(
+        raw_path = runner.run(
             source_wav=source,
             model_path=self.model_path,
             config_path=self.config_path,
@@ -113,6 +113,11 @@ class InferenceWorker(QThread):
             chunk_seconds=self.chunk_seconds,
             on_log=log,
         )
+        # Rename to a unique numbered output so back-to-back conversions
+        # don't overwrite each other. Only do this for the final output
+        # dir — the smart-transpose / separation flows pass a temp
+        # output_dir where we want the predictable fixed name.
+        return self._uniquify_final_path(source, raw_path) if not output_dir else raw_path
 
     def _run_rvc(self, source: str, log, output_dir: str = "") -> str:
         runner = RVCInferenceRunner()
@@ -124,7 +129,7 @@ class InferenceWorker(QThread):
                     index_path = os.path.join(self.model_dir, f)
                     break
 
-        return runner.run(
+        raw_path = runner.run(
             source_wav=source,
             model_path=self.model_path,
             output_dir=output_dir or self.output_dir,
@@ -133,6 +138,19 @@ class InferenceWorker(QThread):
             index_path=index_path,
             on_log=log,
         )
+        return self._uniquify_final_path(source, raw_path) if not output_dir else raw_path
+
+    def _uniquify_final_path(self, source_wav: str, raw_path: str) -> str:
+        """Move `raw_path` (the fixed `<stem>.out.wav` the runner wrote) to
+        a numbered slot via `_next_output_path` so each conversion produces
+        a new file instead of overwriting the previous one."""
+        source_name = Path(source_wav).stem
+        try:
+            target = self._next_output_path(source_name)
+            shutil.move(raw_path, target)
+            return target
+        except Exception:
+            return raw_path
 
     def _run_with_separation(self, log):
         """Separate vocals, convert them, remix with instrumentals."""
