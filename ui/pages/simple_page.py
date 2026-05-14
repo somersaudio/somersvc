@@ -1237,6 +1237,7 @@ class _ModelCarousel(QWidget):
             center_draw_y = cy - c_size // 2 + c_yoff
             model = self._models[self._selected]
             key = model.get("vocal_key", "")
+            ignored = bool(model.get("ignore_vocal_key", False))
             badge_text = key if (key and key != "Auto") else "?"
             bs = self.BADGE_SIZE
             bx = cx_pos - bs // 2
@@ -1246,15 +1247,27 @@ class _ModelCarousel(QWidget):
             badge_path.addRoundedRect(QRectF(bx, by, bs, bs), bs / 2, bs / 2)
             from PyQt6.QtGui import QLinearGradient
             badge_grad = QLinearGradient(bx, by, bx, by + bs)
-            if badge_text == "?":
+            if ignored:
+                # Match the metadata panel's strikethrough cue: muted
+                # background + strikeout font so the user knows this
+                # key is stored but not in use.
+                badge_grad.setColorAt(0.0, QColor(60, 60, 60, 150))
+                badge_grad.setColorAt(1.0, QColor(30, 30, 30, 150))
+            elif badge_text == "?":
                 badge_grad.setColorAt(0.0, QColor(80, 80, 80, 200))
                 badge_grad.setColorAt(1.0, QColor(40, 40, 40, 200))
             else:
                 badge_grad.setColorAt(0.0, QColor(80, 80, 80, 220))
                 badge_grad.setColorAt(1.0, QColor(20, 20, 20, 220))
             painter.fillPath(badge_path, QBrush(badge_grad))
-            painter.setFont(self._badge_font)
-            painter.setPen(QColor(255, 255, 255, 240))
+            if ignored:
+                strike_font = QFont(self._badge_font)
+                strike_font.setStrikeOut(True)
+                painter.setFont(strike_font)
+                painter.setPen(QColor(200, 200, 200, 160))
+            else:
+                painter.setFont(self._badge_font)
+                painter.setPen(QColor(255, 255, 255, 240))
             painter.drawText(QRectF(bx, by, bs, bs), Qt.AlignmentFlag.AlignCenter, badge_text)
 
             self._badge_rect = QRectF(bx, by, bs, bs).toAlignedRect()
@@ -3843,12 +3856,14 @@ class _CreateModelPanel(QWidget):
             pass
 
     def _sync_carousel_ignore_key(self, name: str, ignore: bool) -> None:
-        """Update the carousel's in-memory ignore_vocal_key for `name`."""
+        """Update the carousel's in-memory ignore_vocal_key for `name` and
+        repaint so the badge picks up the new strikethrough / muted state."""
         try:
             for m in getattr(self._carousel, "_models", []) or []:
                 if m.get("name") == name:
                     m["ignore_vocal_key"] = ignore
                     break
+            self._carousel.update()
         except Exception:
             pass
 
