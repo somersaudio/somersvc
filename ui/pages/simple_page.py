@@ -166,28 +166,36 @@ class _WaveformAnalyzer(QThread):
             from services.section_splitter import find_section_splits
             sections = find_section_splits(self.audio_path, max_sections=20)
 
-            # Compute transposes if we have model center
-            transposes = []
-            median_hz_list = []
-            if self.model_center_hz > 0 and len(sections) > 1:
-                import tempfile
-                from services.section_splitter import (
-                    split_audio_file, analyze_section_pitches,
-                    calculate_section_transposes,
-                )
+            # Per-section pitches are needed for the coloring system AND
+            # for transpose calculation. They don't depend on the model,
+            # so always compute them — even if the user hasn't picked a
+            # model yet, or if there's only a single section. Previously
+            # we gated this on (model_center_hz > 0 AND len(sections) > 1)
+            # which meant short clips or "audio dropped before model
+            # selected" stayed gray forever even after the model arrived.
+            import tempfile
+            from services.section_splitter import (
+                split_audio_file, analyze_section_pitches,
+                calculate_section_transposes,
+            )
+            transposes = [0] * len(sections)
+            median_hz_list = [0] * len(sections)
+            if len(sections) >= 1:
                 tmp_dir = tempfile.mkdtemp(prefix="svc_wf_")
                 try:
                     section_paths = split_audio_file(self.audio_path, sections, tmp_dir)
                     pitched = analyze_section_pitches(section_paths)
-                    pitched = calculate_section_transposes(pitched, self.model_center_hz)
-                    transposes = [s.get("transpose", 0) for s in pitched]
                     median_hz_list = [s.get("median_hz", 0) for s in pitched]
+                    if self.model_center_hz > 0:
+                        pitched = calculate_section_transposes(
+                            pitched, self.model_center_hz
+                        )
+                        transposes = [s.get("transpose", 0) for s in pitched]
+                except Exception:
+                    pass
                 finally:
                     import shutil
                     shutil.rmtree(tmp_dir, ignore_errors=True)
-            else:
-                transposes = [0] * len(sections)
-                median_hz_list = [0] * len(sections)
 
             # Normalize section times to 0-1
             norm_sections = [(s / duration, e / duration) for s, e in sections]
@@ -6069,18 +6077,25 @@ class SimplePage(QWidget):
             self._analyze_waveform()
 
     def _update_transpose_info(self):
+        # Sync the waveform widget's model_center_hz any time it changes,
+        # regardless of whether the global source median was detected.
+        # Per-section pitches are computed independently and need this
+        # sync to colorize. Without it, picking a model AFTER dropping
+        # audio left the waveform stuck on the stale value (usually 0,
+        # so all sections rendered gray).
+        if self._waveform._samples:
+            if self._waveform._model_center_hz != self._model_center_hz:
+                self._waveform._model_center_hz = self._model_center_hz
+                self._waveform._invalidate_wave_cache()
+        elif self._source_path and self._model_center_hz > 0:
+            self._analyze_waveform()
+
         if self._source_median_hz > 0 and self._model_center_hz > 0:
             import math
             semitones = round(12 * math.log2(self._model_center_hz / self._source_median_hz))
             model_note = _hz_to_note(self._model_center_hz)
             current = self._lbl_pitch.text().split("→")[0].strip()
             self._lbl_pitch.setText(f"{current}  →  Transpose: {semitones:+d} (to {model_note})")
-            # Update waveform colors without re-analyzing
-            if self._waveform._samples:
-                self._waveform._model_center_hz = self._model_center_hz
-                self._waveform._invalidate_wave_cache()
-            elif self._source_path:
-                self._analyze_waveform()
         # Toggle optimize button state based on whether current model matches optimized model
         if self._waveform._samples and self._btn_optimize.isVisible():
             if self._optimized_for_model >= 0 and self._selected_model_idx == self._optimized_for_model:
