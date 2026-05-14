@@ -5350,9 +5350,28 @@ class SimplePage(QWidget):
         self._total_chunks = 1
         self._chunks_done = 0
 
+        # Output (converted) waveform sits in the MAIN layout right under
+        # the Convert button so the result appears close to where the user
+        # was just looking, instead of pinned to the window bottom inside
+        # the floating overlay. Hidden until a conversion completes.
+        self._lbl_output_name = QLabel("")
+        self._lbl_output_name.setStyleSheet("color: rgba(255,255,255,40); font-size: 9px; background: transparent;")
+        self._lbl_output_name.setFixedHeight(14)
+        self._lbl_output_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_output_name.setVisible(False)
+        layout.addWidget(self._lbl_output_name)
+
+        self._waveform_output = _WaveformWidget(readonly=True)
+        self._waveform_output.setVisible(False)
+        self._waveform_output.interacted.connect(lambda: setattr(self, '_active_waveform', self._waveform_output))
+        layout.addWidget(self._waveform_output)
+
         layout.addStretch()
 
         # ===== BOTTOM AREA (floating overlay, doesn't affect layout) =====
+        # Keeps the log viewer + folder buttons pinned to the bottom.
+        # The output waveform was moved out of here (see above) so it
+        # appears next to the Convert button rather than at the bottom.
         self._bottom_panel = QWidget(self)
         self._bottom_panel.setStyleSheet("background: transparent;")
         bottom_layout = QVBoxLayout(self._bottom_panel)
@@ -5363,17 +5382,6 @@ class SimplePage(QWidget):
         self._log.setMaximumHeight(60)
         self._log.setVisible(False)
         bottom_layout.addWidget(self._log)
-
-        self._lbl_output_name = QLabel("")
-        self._lbl_output_name.setStyleSheet("color: rgba(255,255,255,40); font-size: 9px; background: transparent;")
-        self._lbl_output_name.setFixedHeight(14)
-        self._lbl_output_name.setVisible(False)
-        bottom_layout.addWidget(self._lbl_output_name)
-
-        self._waveform_output = _WaveformWidget(readonly=True)
-        self._waveform_output.setVisible(False)
-        self._waveform_output.interacted.connect(lambda: setattr(self, '_active_waveform', self._waveform_output))
-        bottom_layout.addWidget(self._waveform_output)
 
         folder_row = QHBoxLayout()
         folder_row.setContentsMargins(0, 0, 0, 0)
