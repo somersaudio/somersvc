@@ -215,9 +215,7 @@ class SettingsPage(QWidget):
         # or NVIDIA GPUs. Off by default; pod training is the recommended
         # path for everyone else.
         layout.addSpacing(20)
-        self.chk_train_local = QCheckBox(
-            "Train locally (skip cloud GPU)"
-        )
+        self.chk_train_local = QCheckBox("Train locally")
         self.chk_train_local.setToolTip(
             "Run the entire training pipeline on this computer instead of "
             "renting a cloud GPU. Only practical on very fast Macs (M5+) "
