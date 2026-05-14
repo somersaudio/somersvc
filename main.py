@@ -31,12 +31,11 @@ if os.path.exists(env_path):
 from services.paths import ensure_dirs
 ensure_dirs()
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QFont, QFontDatabase
-from PyQt6.QtCore import Qt
-
-from ui.main_window import MainWindow
-from ui.styles import DARK_THEME
+# Deliberately NOT importing PyQt6 / ui.* at module scope. Doing so
+# triggers Cocoa init (linker side-effects + QtCore static state) which
+# in subprocess mode (--svc-mode / --demucs-mode) causes macOS
+# LaunchServices to spawn a second app window. We import these inside
+# main() only on the GUI branch so the subprocess stays cold.
 
 
 def auto_update():
@@ -161,6 +160,16 @@ def main():
         return
 
     auto_update()
+
+    # Qt + UI imports are deliberately deferred to here so a subprocess
+    # spawned with --svc-mode / --demucs-mode never loads them. Loading
+    # PyQt6 at module scope was triggering Cocoa side effects in the
+    # subprocess and macOS would pop a second app window.
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtGui import QFont, QFontDatabase
+    from PyQt6.QtCore import Qt
+    from ui.main_window import MainWindow
+    from ui.styles import DARK_THEME
 
     app = QApplication(sys.argv)
     app.setApplicationName("SomerSVC")
