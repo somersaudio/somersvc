@@ -253,7 +253,7 @@ class TrainingOrchestrator:
                 self._log("Installing so-vits-svc-fork (keeping existing PyTorch)...")
                 exit_code = ssh.exec_command(
                     "pip install 'so-vits-svc-fork<4.2' --no-deps && "
-                    "pip install cm-time click fastapi librosa 'lightning<2.5' matplotlib "
+                    "pip install cm-time click fastapi librosa 'lightning<2.5' 'matplotlib<3.9' "
                     "pebble praat-parselmouth psutil pysimplegui-4-foss pyworld "
                     "requests rich scipy sounddevice soundfile tensorboard "
                     "tensorboardx torchcrepe tqdm tqdm-joblib 'transformers<4.46' "
@@ -263,6 +263,30 @@ class TrainingOrchestrator:
                 )
                 if exit_code != 0:
                     raise RuntimeError(f"Failed to install so-vits-svc-fork (exit code {exit_code})")
+
+            # Heal svc-fork's plot_spectrogram_to_numpy on pods where
+            # matplotlib >= 3.10 (tostring_rgb removed) or numpy >= 2
+            # (np.fromstring binary mode removed) leaked through. The
+            # replacement uses buffer_rgba() + alpha-strip and produces
+            # an identically-shaped flat RGB byte array, so the next
+            # data.reshape(W, H, 3) line in utils.py still works.
+            # Idempotent: runs whether we just installed or skipped.
+            self._log("Patching svc-fork utils.py for matplotlib/numpy compat...")
+            patch_script = (
+                "import so_vits_svc_fork, pathlib; "
+                "p = pathlib.Path(so_vits_svc_fork.__file__).parent / 'utils.py'; "
+                "s = p.read_text(); "
+                "old = 'np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep=\\\"\\\")'; "
+                "new = 'np.asarray(fig.canvas.buffer_rgba())[..., :3].reshape(-1)'; "
+                "s2 = s.replace(old, new); "
+                "p.write_text(s2); "
+                "print('patched' if s != s2 else 'already-patched')"
+            )
+            ssh.exec_command(
+                f'python3 -c "{patch_script}"',
+                on_stdout=self._log,
+                on_stderr=self._log,
+            )
 
             # Verify CUDA
             ssh.exec_command(
