@@ -1237,7 +1237,6 @@ class _ModelCarousel(QWidget):
             center_draw_y = cy - c_size // 2 + c_yoff
             model = self._models[self._selected]
             key = model.get("vocal_key", "")
-            ignored = bool(model.get("ignore_vocal_key", False))
             badge_text = key if (key and key != "Auto") else "?"
             bs = self.BADGE_SIZE
             bx = cx_pos - bs // 2
@@ -1247,27 +1246,15 @@ class _ModelCarousel(QWidget):
             badge_path.addRoundedRect(QRectF(bx, by, bs, bs), bs / 2, bs / 2)
             from PyQt6.QtGui import QLinearGradient
             badge_grad = QLinearGradient(bx, by, bx, by + bs)
-            if ignored:
-                # Match the metadata panel's strikethrough cue: muted
-                # background + strikeout font so the user knows this
-                # key is stored but not in use.
-                badge_grad.setColorAt(0.0, QColor(60, 60, 60, 150))
-                badge_grad.setColorAt(1.0, QColor(30, 30, 30, 150))
-            elif badge_text == "?":
+            if badge_text == "?":
                 badge_grad.setColorAt(0.0, QColor(80, 80, 80, 200))
                 badge_grad.setColorAt(1.0, QColor(40, 40, 40, 200))
             else:
                 badge_grad.setColorAt(0.0, QColor(80, 80, 80, 220))
                 badge_grad.setColorAt(1.0, QColor(20, 20, 20, 220))
             painter.fillPath(badge_path, QBrush(badge_grad))
-            if ignored:
-                strike_font = QFont(self._badge_font)
-                strike_font.setStrikeOut(True)
-                painter.setFont(strike_font)
-                painter.setPen(QColor(200, 200, 200, 160))
-            else:
-                painter.setFont(self._badge_font)
-                painter.setPen(QColor(255, 255, 255, 240))
+            painter.setFont(self._badge_font)
+            painter.setPen(QColor(255, 255, 255, 240))
             painter.drawText(QRectF(bx, by, bs, bs), Qt.AlignmentFlag.AlignCenter, badge_text)
 
             self._badge_rect = QRectF(bx, by, bs, bs).toAlignedRect()
@@ -3764,8 +3751,8 @@ class _CreateModelPanel(QWidget):
             self._show_rank_override_menu()
         elif link == "vocal-key-edit":
             self._edit_vocal_key()
-        elif link == "vocal-key-ignore":
-            self._toggle_ignore_vocal_key()
+        # vocal-key-ignore link removed from the panel; handler left out
+        # so any stale clicks are silently no-op.
 
     def _edit_vocal_key(self) -> None:
         """Prompt for a new vocal-key note (e.g. 'D4') and persist it."""
@@ -4116,30 +4103,18 @@ class _CreateModelPanel(QWidget):
             )
             rows.append(_row("Maturity", f"{int(maturity):,}", help_icon))
         if vocal_key:
-            ignore_key = bool(metadata.get("ignore_vocal_key", False))
-            # Click "D4" → inline edit prompt. When ignored, render with
-            # strikethrough so the user sees the stored value but knows
-            # it's not being used for auto-transpose / Best Match.
-            value_style = (
-                "text-decoration:line-through;color:rgba(255,255,255,90);"
-                if ignore_key else
-                "text-decoration:none;color:inherit;"
-            )
+            # Click "D4" → inline edit prompt.
+            # NOTE: "Ignore this key" toggle row removed — too easy to flip
+            # accidentally, and old metadata flags are now inert (see also
+            # _detect_model_key, _find_best_match, carousel badge paint).
+            # _toggle_ignore_vocal_key / _sync_carousel_ignore_key are kept
+            # as dead code so the feature can be revived without rewriting.
             value_html = (
-                f'<a href="vocal-key-edit" style="{value_style}">'
+                f'<a href="vocal-key-edit" '
+                f'style="text-decoration:none;color:inherit;">'
                 f'{vocal_key} ▾</a>'
             )
             rows.append(_row("Vocal key", value_html))
-            # ASCII brackets — Qt's link hit-test on unicode ballot-box
-            # glyphs was unreliable; sticking to plain text. Font-size
-            # matches the panel default so the click target is the full
-            # row, not a 10px sliver.
-            check = "[x]" if ignore_key else "[ ]"
-            rows.append(
-                f'<a href="vocal-key-ignore" '
-                f'style="text-decoration:none;color:rgba(255,255,255,160);">'
-                f'{check} Ignore this key</a>'
-            )
         if checkpoint:
             rows.append(_row("Checkpoint", checkpoint))
         if trained_str:
@@ -5590,8 +5565,7 @@ class SimplePage(QWidget):
 
         for i in range(1, self._cmb_model.count()):  # skip index 0 (Best Match)
             model = self._carousel._models[i]
-            if model.get("ignore_vocal_key", False):
-                continue
+            # ignore_vocal_key skip removed — feature hidden.
             key = model.get("vocal_key", "")
             if not key or key == "Auto":
                 continue
@@ -5684,12 +5658,10 @@ class SimplePage(QWidget):
             try:
                 with open(meta_path) as f:
                     meta = json.load(f)
-                # If the user has marked the stored key as bad / to-ignore,
-                # skip the auto-transpose path entirely.
-                if meta.get("ignore_vocal_key", False):
-                    self._model_center_hz = 0
-                    self._update_transpose_info()
-                    return
+                # ignore_vocal_key check removed — the user-facing toggle
+                # was hidden because it was too easy to flip accidentally.
+                # Any stale `ignore_vocal_key: true` in metadata is now
+                # ignored itself, so the saved key is always honored.
                 key = meta.get("vocal_key", "")
                 if key and key != "Auto":
                     self._model_center_hz = _note_to_hz(key)
