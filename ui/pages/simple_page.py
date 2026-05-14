@@ -4002,11 +4002,15 @@ class _CreateModelPanel(QWidget):
                 f'{vocal_key} ▾</a>'
             )
             rows.append(_row("Vocal key", value_html))
-            check = "☑" if ignore_key else "☐"
+            # ASCII brackets — Qt's link hit-test on unicode ballot-box
+            # glyphs was unreliable; sticking to plain text. Font-size
+            # matches the panel default so the click target is the full
+            # row, not a 10px sliver.
+            check = "[x]" if ignore_key else "[ ]"
             rows.append(
-                f'<a href="vocal-key-ignore" style="text-decoration:none;'
-                f'color:rgba(255,255,255,140);font-size:10px;">'
-                f'{check} Ignore key</a>'
+                f'<a href="vocal-key-ignore" '
+                f'style="text-decoration:none;color:rgba(255,255,255,160);">'
+                f'{check} Ignore this key</a>'
             )
         if checkpoint:
             rows.append(_row("Checkpoint", checkpoint))
