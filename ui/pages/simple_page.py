@@ -3123,32 +3123,59 @@ class _CreateModelPanel(QWidget):
         """Carousel-era replacement: just rebuild the carousel from disk."""
         self._populate_existing_datasets()
 
+    # Per-tier timing model, calibrated against the cost table:
+    #   batch       — what the pod's optimize.py will set based on VRAM
+    #   sec_per_step — observed wall-clock per training step on that GPU
+    #   label        — short human name shown in the suggestion text
+    _TIER_TIMING = {
+        "cheapest":  {"batch": 96,  "sec_per_step": 4.5, "label": "A40"},
+        "balanced":  {"batch": 96,  "sec_per_step": 2.8, "label": "RTX 6000 Ada"},
+        "fast":      {"batch": 192, "sec_per_step": 2.5, "label": "A100 SXM"},
+        "fastest":   {"batch": 192, "sec_per_step": 1.3, "label": "H100 SXM"},
+    }
+
+    def _current_gpu_tier(self) -> str:
+        try:
+            from services.job_store import load_config
+            return (load_config() or {}).get("preferred_gpu_tier", "cheapest")
+        except Exception:
+            return "cheapest"
+
+    def _estimate_training_time(
+        self, total_epochs: int, current_epochs: int, clips: int,
+        is_resume: bool = False, tier: str | None = None,
+    ) -> tuple[str, str]:
+        """Wall-clock estimate + GPU label for the user's selected tier.
+
+        Returns (duration_string, gpu_label) — e.g. ("~42 min", "A40").
+        Math: delta_epochs × batches_per_epoch × sec_per_step + ~6 min of
+        pod boot/install/download overhead + ~3s per checkpoint save.
+        """
+        import math
+        if tier is None:
+            tier = self._current_gpu_tier()
+        params = self._TIER_TIMING.get(tier, self._TIER_TIMING["cheapest"])
+        label = params["label"]
+        delta = max(0, total_epochs - max(current_epochs, 0))
+        if delta <= 0:
+            return "", label
+        batches_per_epoch = max(1, math.ceil(max(clips, 1) / params["batch"]))
+        train_sec = delta * batches_per_epoch * params["sec_per_step"]
+        save_sec = (delta / 25) * 3
+        overhead_sec = 6 * 60
+        total_sec = train_sec + save_sec + overhead_sec
+        return self._format_duration_minutes(total_sec), label
+
+    # Back-compat shim — older call sites used the A40-specific name.
     def _estimate_training_time_a40(
         self, total_epochs: int, current_epochs: int, clips: int,
         is_resume: bool = False,
     ) -> str:
-        """Rough A40 wall-clock estimate as a human string ("~42 min", "~1h 30min").
-
-        Math (calibrated against observed runs):
-        - Per-epoch time on A40 ≈ batches_per_epoch × ~2 s (with batch=96)
-        - Checkpoint saves every 25 epochs cost ~3 s each
-        - Pod boot + deps install for fresh runs adds ~6 min
-        - Resume reuses an existing pod context if any, but a new pod still
-          needs the same boot + dep install on first launch, so we bake in
-          the same overhead either way.
-        """
-        import math
-        delta = max(0, total_epochs - max(current_epochs, 0))
-        if delta <= 0:
-            return ""
-        batches_per_epoch = max(1, math.ceil(max(clips, 1) / 96))
-        sec_per_batch = 2.0
-        train_sec = delta * batches_per_epoch * sec_per_batch
-        save_sec = (delta / 25) * 3
-        # Pod-boot + dep install + final download: ~6 min always
-        overhead_sec = 6 * 60
-        total_sec = train_sec + save_sec + overhead_sec
-        return self._format_duration_minutes(total_sec)
+        eta, _ = self._estimate_training_time(
+            total_epochs, current_epochs, clips, is_resume=is_resume,
+            tier="cheapest",
+        )
+        return eta
 
     @staticmethod
     def _format_duration_minutes(seconds: float) -> str:
@@ -3494,11 +3521,11 @@ class _CreateModelPanel(QWidget):
                 req_maturity = TRAIN_TARGET_MATURITY[needed_train_score - 1]
                 req_epochs = int(req_maturity * new_clips / max(batch, 1))
                 req_epochs = max(req_epochs, epochs + 100)
-                eta = self._estimate_training_time_a40(
+                eta, gpu_label = self._estimate_training_time(
                     req_epochs, current_epochs=epochs, clips=new_clips,
                     is_resume=True,
                 )
-                eta_str = f" ({eta} on A40)" if eta else ""
+                eta_str = f" ({eta} on {gpu_label})" if eta else ""
                 return (
                     f"Add {mins_str} of audio and train to "
                     f"~{req_epochs:,} epochs{eta_str}"
@@ -3513,10 +3540,10 @@ class _CreateModelPanel(QWidget):
                 if clips > 0 else 0
             )
             target_epochs = max(epochs + max(extra_epochs, 100), epochs + 100)
-            eta = self._estimate_training_time_a40(
+            eta, gpu_label = self._estimate_training_time(
                 target_epochs, current_epochs=epochs, clips=clips, is_resume=True,
             )
-            eta_str = f" ({eta} on A40)" if eta else ""
+            eta_str = f" ({eta} on {gpu_label})" if eta else ""
             return f"Continue training to ~{target_epochs:,} epochs{eta_str}"
 
         def _grade_badge_html(grade: str, height: int = 20) -> str:
@@ -4504,7 +4531,7 @@ class _CreateModelPanel(QWidget):
                         current_ep_for_est = int(_m.group(1))
                 except Exception:
                     pass
-            eta = self._estimate_training_time_a40(
+            eta, gpu_label = self._estimate_training_time(
                 self._recommended_epochs,
                 current_epochs=current_ep_for_est,
                 clips=len(self._clips),
@@ -4516,13 +4543,13 @@ class _CreateModelPanel(QWidget):
                 m, s = divmod(int(total_dur_log), 60)
                 self._log.append_line(
                     f"Target: {self._recommended_epochs} epochs "
-                    f"(dataset duration: {m}:{s:02d}, est. {eta} on A40) — "
+                    f"(dataset duration: {m}:{s:02d}, est. {eta} on {gpu_label}) — "
                     f"training will auto-stop here."
                 )
             except Exception:
                 self._log.append_line(
                     f"Target: {self._recommended_epochs} epochs "
-                    f"(est. {eta} on A40) — training will auto-stop here."
+                    f"(est. {eta} on {gpu_label}) — training will auto-stop here."
                 )
             self._current_epoch = 0
             self._auto_stop_fired = False
