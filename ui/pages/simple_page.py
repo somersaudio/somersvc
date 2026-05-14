@@ -3636,6 +3636,108 @@ class _CreateModelPanel(QWidget):
         """Handle clicks on inline links in the metadata panel."""
         if link == "rank-override":
             self._show_rank_override_menu()
+        elif link == "vocal-key-edit":
+            self._edit_vocal_key()
+        elif link == "vocal-key-ignore":
+            self._toggle_ignore_vocal_key()
+
+    def _edit_vocal_key(self) -> None:
+        """Prompt for a new vocal-key note (e.g. 'D4') and persist it."""
+        name = (self._selected_name or "").strip()
+        if not name:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        from services.paths import MODELS_DIR
+        meta_path = os.path.join(str(MODELS_DIR), name, "metadata.json")
+        if not os.path.exists(meta_path):
+            return
+        import json as _json
+        try:
+            with open(meta_path) as f:
+                meta = _json.load(f) or {}
+        except Exception:
+            meta = {}
+        current = (meta.get("vocal_key") or "").strip()
+        new_key, ok = QInputDialog.getText(
+            self,
+            "Edit vocal key",
+            "Enter a note (e.g. D4, F#3). Leave blank to clear.",
+            text=current,
+        )
+        if not ok:
+            return
+        new_key = new_key.strip()
+        if new_key and _note_to_hz(new_key) <= 0:
+            self._lbl_status.setText(
+                f"'{new_key}' is not a valid note — try D4, F#3, etc."
+            )
+            return
+        meta["vocal_key"] = new_key
+        try:
+            with open(meta_path, "w") as f:
+                _json.dump(meta, f, indent=2)
+        except Exception as e:
+            self._lbl_status.setText(f"Could not save key: {e}")
+            return
+        # Reload the carousel-side vocal_key so Best Match sees the new
+        # value, then refresh the metadata panel + transpose calc.
+        self._sync_carousel_vocal_key(name, new_key)
+        self._detect_model_key()
+        self._update_metadata_panel(name)
+
+    def _toggle_ignore_vocal_key(self) -> None:
+        """Flip ignore_vocal_key on the selected model and refresh.
+        When ignored, this model is excluded from Best Match selection
+        and no auto-transpose runs."""
+        name = (self._selected_name or "").strip()
+        if not name:
+            return
+        from services.paths import MODELS_DIR
+        meta_path = os.path.join(str(MODELS_DIR), name, "metadata.json")
+        if not os.path.exists(meta_path):
+            return
+        import json as _json
+        try:
+            with open(meta_path) as f:
+                meta = _json.load(f) or {}
+        except Exception:
+            meta = {}
+        new_flag = not bool(meta.get("ignore_vocal_key", False))
+        meta["ignore_vocal_key"] = new_flag
+        try:
+            with open(meta_path, "w") as f:
+                _json.dump(meta, f, indent=2)
+        except Exception as e:
+            self._lbl_status.setText(f"Could not save: {e}")
+            return
+        self._sync_carousel_ignore_key(name, new_flag)
+        if new_flag:
+            self._model_center_hz = 0
+            self._update_transpose_info()
+        else:
+            self._detect_model_key()
+        self._update_metadata_panel(name)
+
+    def _sync_carousel_vocal_key(self, name: str, key: str) -> None:
+        """Update the carousel's in-memory vocal_key for `name` so
+        Best Match resolution uses the new value without a full reload."""
+        try:
+            for m in getattr(self._carousel, "_models", []) or []:
+                if m.get("name") == name:
+                    m["vocal_key"] = key
+                    break
+        except Exception:
+            pass
+
+    def _sync_carousel_ignore_key(self, name: str, ignore: bool) -> None:
+        """Update the carousel's in-memory ignore_vocal_key for `name`."""
+        try:
+            for m in getattr(self._carousel, "_models", []) or []:
+                if m.get("name") == name:
+                    m["ignore_vocal_key"] = ignore
+                    break
+        except Exception:
+            pass
 
     def _show_rank_override_menu(self) -> None:
         """Pop up a small menu so the user can manually pick a rank for a
@@ -3886,7 +3988,26 @@ class _CreateModelPanel(QWidget):
             )
             rows.append(_row("Maturity", f"{int(maturity):,}", help_icon))
         if vocal_key:
-            rows.append(_row("Vocal key", vocal_key))
+            ignore_key = bool(metadata.get("ignore_vocal_key", False))
+            # Click "D4" → inline edit prompt. When ignored, render with
+            # strikethrough so the user sees the stored value but knows
+            # it's not being used for auto-transpose / Best Match.
+            value_style = (
+                "text-decoration:line-through;color:rgba(255,255,255,90);"
+                if ignore_key else
+                "text-decoration:none;color:inherit;"
+            )
+            value_html = (
+                f'<a href="vocal-key-edit" style="{value_style}">'
+                f'{vocal_key} ▾</a>'
+            )
+            rows.append(_row("Vocal key", value_html))
+            check = "☑" if ignore_key else "☐"
+            rows.append(
+                f'<a href="vocal-key-ignore" style="text-decoration:none;'
+                f'color:rgba(255,255,255,140);font-size:10px;">'
+                f'{check} Ignore key</a>'
+            )
         if checkpoint:
             rows.append(_row("Checkpoint", checkpoint))
         if trained_str:
@@ -5298,6 +5419,7 @@ class SimplePage(QWidget):
 
                 # Load vocal key from metadata
                 vocal_key = ""
+                ignore_vocal_key = False
                 meta_path = os.path.join(model_dir, "metadata.json")
                 if os.path.exists(meta_path):
                     try:
@@ -5305,10 +5427,15 @@ class SimplePage(QWidget):
                         with open(meta_path) as _f:
                             _meta = _json.load(_f)
                         vocal_key = _meta.get("vocal_key", "")
+                        ignore_vocal_key = bool(_meta.get("ignore_vocal_key", False))
                     except Exception:
                         pass
 
-                models.append({"name": name, "dir": model_dir, "pixmap": pixmap, "vocal_key": vocal_key})
+                models.append({
+                    "name": name, "dir": model_dir, "pixmap": pixmap,
+                    "vocal_key": vocal_key,
+                    "ignore_vocal_key": ignore_vocal_key,
+                })
 
         self._carousel.set_models(models)
         if models:
@@ -5331,6 +5458,8 @@ class SimplePage(QWidget):
 
         for i in range(1, self._cmb_model.count()):  # skip index 0 (Best Match)
             model = self._carousel._models[i]
+            if model.get("ignore_vocal_key", False):
+                continue
             key = model.get("vocal_key", "")
             if not key or key == "Auto":
                 continue
@@ -5423,6 +5552,12 @@ class SimplePage(QWidget):
             try:
                 with open(meta_path) as f:
                     meta = json.load(f)
+                # If the user has marked the stored key as bad / to-ignore,
+                # skip the auto-transpose path entirely.
+                if meta.get("ignore_vocal_key", False):
+                    self._model_center_hz = 0
+                    self._update_transpose_info()
+                    return
                 key = meta.get("vocal_key", "")
                 if key and key != "Auto":
                     self._model_center_hz = _note_to_hz(key)
