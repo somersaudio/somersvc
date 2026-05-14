@@ -129,6 +129,14 @@ def main():
     # the so-vits-svc-fork CLI instead of starting the GUI. This lets the
     # bundled .app act as its own `svc` binary.
     if len(sys.argv) > 1 and sys.argv[1] == "--svc-mode":
+        # Force matplotlib's headless Agg backend BEFORE any svc-fork
+        # import. svc-fork's utils.py does `import matplotlib.pylab` at
+        # module scope; on macOS the default `macosx` backend loads the
+        # _macosx C extension which spins up its own NSApplication with
+        # Regular activation policy — that's the "second window / second
+        # Dock icon" the user has been seeing on Convert. Agg has no
+        # Cocoa code path, so the policy we set below stays in force.
+        os.environ.setdefault("MPLBACKEND", "Agg")
         _hide_subprocess_from_dock()
         # NumPy 2.x removed binary-mode np.fromstring; svc-fork's
         # plot_spectrogram_to_numpy still uses it. Monkey-patch so
@@ -154,6 +162,9 @@ def main():
     # Same trick for demucs (vocal isolation) — the bundled .app has no
     # standalone `python` to run `python -m demucs`, so we re-exec ourselves.
     if len(sys.argv) > 1 and sys.argv[1] == "--demucs-mode":
+        # Same matplotlib-on-macOS guard as --svc-mode; demucs and its
+        # deps drag matplotlib in transitively too.
+        os.environ.setdefault("MPLBACKEND", "Agg")
         _hide_subprocess_from_dock()
         from demucs.separate import main as demucs_main
         demucs_main(sys.argv[2:])
