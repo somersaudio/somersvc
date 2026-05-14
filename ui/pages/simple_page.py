@@ -2906,7 +2906,14 @@ class _CreateModelPanel(QWidget):
         dlg.exec()
 
     def _import_model_file(self):
-        """Import a .svc / .pth / .zip model from disk into the user's models dir."""
+        """Import a .svc / .pth / .zip model from disk into the user's models dir.
+
+        Detection is by file content, not extension. iMessage / Mail / AirDrop
+        will frequently strip the file extension on the recipient's side, and
+        modern torch-saved .pth files are zip-formatted internally — both of
+        which made the extension-based dispatcher fall over with confusing
+        "File is not a zip file" / "No model checkpoint found" errors.
+        """
         path, _ = QFileDialog.getOpenFileName(
             self, "Import Model", "",
             "All Models (*.svc *.pth *.zip);;SomerSVC Model (*.svc);;"
@@ -2921,9 +2928,83 @@ class _CreateModelPanel(QWidget):
         import shutil
         import zipfile
 
+        # ── Content-based type detection ────────────────────────────────
+        # Read the magic bytes to decide which path to take.
+        # - PK\x03\x04 : ZIP (either an .svc bundle or a modern torch .pth)
+        # - \x80\x0[2-5] : Python pickle (legacy torch .pth, < 1.6)
         try:
-            # Loose .pth (RVC-style) - ask for a name, drop in its own folder
-            if path.lower().endswith(".pth"):
+            with open(path, "rb") as _f:
+                magic = _f.read(4)
+        except Exception as e:
+            QMessageBox.warning(self, "Import Failed", f"Could not read file: {e}")
+            return
+
+        zip_magic = magic.startswith(b"PK\x03\x04")
+        is_pickle = (
+            len(magic) >= 2 and magic[0] == 0x80 and magic[1] in (2, 3, 4, 5)
+        )
+
+        # If the zip magic is there, try opening it for real to decide
+        # whether the bundle is intact (and whether it's a .svc with a .pth
+        # member vs a modern torch zip-format .pth with no .pth member).
+        # A truncated transfer produces a file with a valid PK header but
+        # invalid central directory — caught as BadZipFile.
+        is_zip = False
+        zip_truncated = False
+        is_svc_bundle = False
+        if zip_magic:
+            try:
+                with zipfile.ZipFile(path, "r") as _zf:
+                    is_zip = True
+                    is_svc_bundle = any(
+                        n.endswith(".pth") for n in _zf.namelist()
+                    )
+            except zipfile.BadZipFile:
+                zip_truncated = True  # header OK, body corrupt
+
+        # Truncated zip → tell the user exactly what's wrong + how to fix it.
+        if zip_truncated:
+            try:
+                sz = os.path.getsize(path)
+            except OSError:
+                sz = 0
+            size_mb = sz / (1024 * 1024)
+            QMessageBox.warning(
+                self, "Model file looks incomplete",
+                f"This bundle's header is valid but the rest of the file is "
+                f"missing or damaged — almost always a sign the transfer was "
+                f"truncated.\n\n"
+                f"File size: {size_mb:.1f} MB. Trained model bundles are "
+                f"usually 150–500 MB.\n\n"
+                f"Ask the sender to share via Google Drive, Dropbox, or a "
+                f"direct download link instead of Messages, Mail, or AirDrop."
+            )
+            return
+
+        # Reject anything we definitely can't handle, with a hint about the
+        # most common cause (extension stripped in transit).
+        if not is_zip and not is_pickle:
+            QMessageBox.warning(
+                self, "Unrecognized File",
+                "This doesn't look like a SomerSVC model (.svc), an RVC "
+                "checkpoint (.pth), or a zip bundle.\n\n"
+                "If it was sent via Mail, Messages, or AirDrop and lost its "
+                "extension, try renaming it to end in .pth or .svc and try "
+                "again."
+            )
+            return
+
+        # Treat a torch-zip .pth identically to a legacy pickle .pth — both
+        # are single-checkpoint imports. Only a real .svc bundle takes the
+        # multi-file extraction path.
+        treat_as_loose_pth = (is_pickle or (is_zip and not is_svc_bundle))
+
+        try:
+            # Loose .pth (RVC-style or modern torch zip) — ask for a name,
+            # drop in its own folder. Force the saved filename to end in
+            # .pth so the loader recognizes it even when the source file
+            # had its extension stripped.
+            if treat_as_loose_pth:
                 from PyQt6.QtWidgets import QInputDialog
                 stem = os.path.splitext(os.path.basename(path))[0]
                 for suffix in ("_v2", "_v1", "-v2", "-v1"):
@@ -2938,7 +3019,12 @@ class _CreateModelPanel(QWidget):
                 name = name.strip()
                 dest = os.path.join(models_root, name)
                 os.makedirs(dest, exist_ok=True)
-                shutil.copy2(path, os.path.join(dest, os.path.basename(path)))
+                # Ensure the saved file has a .pth extension so the loader
+                # finds it — the source may have arrived extension-less.
+                base = os.path.basename(path)
+                if not base.lower().endswith(".pth"):
+                    base = base + ".pth"
+                shutil.copy2(path, os.path.join(dest, base))
                 # If a .index file lives next to it, bring that along too
                 pth_dir = os.path.dirname(path)
                 for f in os.listdir(pth_dir):
@@ -2959,9 +3045,28 @@ class _CreateModelPanel(QWidget):
                     top = names[0].split("/")[0]
                     has_pth = any(n.endswith(".pth") for n in names)
                     if not has_pth:
+                        # We only enter this branch when is_svc_bundle was
+                        # True at detection time — so the .pth member must
+                        # have gone missing between detection and now (rare
+                        # race), OR the file was corrupted in transit and
+                        # only some entries survived. Either way, point the
+                        # user at the most actionable next step.
+                        try:
+                            sz = os.path.getsize(path)
+                        except OSError:
+                            sz = 0
+                        size_mb = sz / (1024 * 1024)
                         QMessageBox.warning(
-                            self, "Invalid",
-                            "No model checkpoint (.pth) found in this file."
+                            self, "Model file looks incomplete",
+                            f"The bundle opened, but the model checkpoint "
+                            f"(.pth) inside is missing.\n\n"
+                            f"This usually means the file was truncated in "
+                            f"transit — Messages, Mail, and AirDrop can drop "
+                            f"large files silently. The bundle is "
+                            f"{size_mb:.1f} MB; a trained model bundle is "
+                            f"usually 150–500 MB.\n\n"
+                            f"Ask the sender to share via Google Drive, "
+                            f"Dropbox, or a download link instead."
                         )
                         return
                     model_dest = os.path.join(models_root, top)
