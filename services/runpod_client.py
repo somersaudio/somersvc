@@ -5,14 +5,44 @@ import runpod
 # GPUs compatible with CUDA 11.8 / PyTorch 2.1 (sm_50 to sm_90 only)
 # NO Blackwell (sm_120): RTX 5090, 5080, PRO 4500/6000, B200, B300
 GPU_PREFERENCE = [
-    "NVIDIA A40",                 # $0.20/hr — best value, High avail
-    "NVIDIA GeForce RTX 4090",    # $0.50/hr
-    "NVIDIA GeForce RTX 3090",    # $0.34/hr
-    "NVIDIA RTX A6000",           # $0.40/hr
-    "NVIDIA RTX A5000",           # $0.20/hr
-    "NVIDIA A100 80GB PCIe",      # $1.14/hr
-    "NVIDIA A100-SXM4-80GB",      # $1.22/hr
+    "NVIDIA A40",                 # ~$0.44/hr — best value
+    "NVIDIA GeForce RTX 4090",    # ~$0.69/hr
+    "NVIDIA GeForce RTX 3090",    # ~$0.46/hr
+    "NVIDIA RTX A6000",           # ~$0.49/hr
+    "NVIDIA RTX A5000",           # ~$0.27/hr
+    "NVIDIA A100 80GB PCIe",      # ~$1.39/hr
+    "NVIDIA A100-SXM4-80GB",      # ~$1.49/hr
 ]
+
+# Settings → "Cloud GPU" radio tiers map to ordered preference chains.
+# Each chain starts with the tier's primary GPU and degrades through
+# the next-best options on the same Pareto frontier so an unavailable
+# pick still gets something usable.
+TIER_CHAINS = {
+    "cheapest": [
+        "NVIDIA A40",
+        "NVIDIA RTX A6000",
+        "NVIDIA RTX 6000 Ada Generation",
+    ],
+    "balanced": [
+        "NVIDIA RTX 6000 Ada Generation",
+        "NVIDIA A100 80GB PCIe",
+        "NVIDIA RTX A6000",
+        "NVIDIA A40",
+    ],
+    "fast": [
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA A100 80GB PCIe",
+        "NVIDIA H100 80GB HBM3",
+        "NVIDIA RTX 6000 Ada Generation",
+    ],
+    "fastest": [
+        "NVIDIA H100 80GB HBM3",
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA A100 80GB PCIe",
+        "NVIDIA RTX 6000 Ada Generation",
+    ],
+}
 
 
 class RunPodClient:
@@ -33,13 +63,26 @@ class RunPodClient:
         except Exception:
             return []
 
-    def create_training_pod(self, ssh_public_key: str = "", on_log=None) -> dict:
+    def create_training_pod(
+        self,
+        ssh_public_key: str = "",
+        on_log=None,
+        preferred_tier: str = "cheapest",
+    ) -> dict:
         log = on_log or (lambda _: None)
         env_vars = {}
         if ssh_public_key:
             env_vars["PUBLIC_KEY"] = ssh_public_key
 
-        for gpu_type in GPU_PREFERENCE:
+        # Build the chain: tier preference first, then fall through to the
+        # rest of GPU_PREFERENCE so an unavailable pick degrades silently.
+        chain = list(TIER_CHAINS.get(preferred_tier, TIER_CHAINS["cheapest"]))
+        for gpu in GPU_PREFERENCE:
+            if gpu not in chain:
+                chain.append(gpu)
+        log(f"GPU tier: {preferred_tier} → trying {chain[0]} first")
+
+        for gpu_type in chain:
             try:
                 log(f"Trying {gpu_type}...")
                 pod = runpod.create_pod(

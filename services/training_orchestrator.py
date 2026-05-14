@@ -186,7 +186,15 @@ class TrainingOrchestrator:
                     with open(pub_key_path) as f:
                         ssh_pub_key = f.read().strip()
 
-                pod = self.runpod.create_training_pod(ssh_pub_key, on_log=self._log)
+                # Read user's GPU tier preference from app config.
+                try:
+                    from services.job_store import load_config as _lc
+                    _tier = (_lc() or {}).get("preferred_gpu_tier", "cheapest")
+                except Exception:
+                    _tier = "cheapest"
+                pod = self.runpod.create_training_pod(
+                    ssh_pub_key, on_log=self._log, preferred_tier=_tier,
+                )
                 pod_id = pod["id"]
                 self._pod_id_for_stop = pod_id
                 self._log(f"Pod created: {pod_id}")

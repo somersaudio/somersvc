@@ -6,6 +6,7 @@ import webbrowser
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QFileDialog,
     QHBoxLayout,
@@ -13,6 +14,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -164,6 +166,48 @@ class SettingsPage(QWidget):
         spotify_row.addWidget(self.txt_spotify_secret, 1)
         layout.addLayout(spotify_row)
 
+        # ── Cloud GPU tier ──────────────────────────────────────────────
+        layout.addSpacing(20)
+        gpu_header = QLabel("Cloud GPU")
+        gpu_header.setStyleSheet("color: #ddd; font-size: 13px; font-weight: 600;")
+        layout.addWidget(gpu_header)
+        gpu_hint = QLabel(
+            "Pick the GPU tier for training on RunPod. All four are "
+            "compatible with the trainer; cheaper tiers take longer "
+            "but cost less per run."
+        )
+        gpu_hint.setStyleSheet("color: rgba(255,255,255,90); font-size: 10px;")
+        gpu_hint.setWordWrap(True)
+        layout.addWidget(gpu_hint)
+        layout.addSpacing(4)
+
+        self._gpu_tier_group = QButtonGroup(self)
+        self.rb_gpu_cheapest = QRadioButton(
+            "Cheapest      A40            ~45 min  •  ~$0.38"
+        )
+        self.rb_gpu_balanced = QRadioButton(
+            "Balanced      RTX 6000 Ada   ~30 min  •  ~$0.48"
+        )
+        self.rb_gpu_fast = QRadioButton(
+            "Fast          A100 SXM       ~28 min  •  ~$0.87"
+        )
+        self.rb_gpu_fastest = QRadioButton(
+            "Fastest       H100 SXM       ~18 min  •  ~$1.25"
+        )
+        for i, rb in enumerate((
+            self.rb_gpu_cheapest, self.rb_gpu_balanced,
+            self.rb_gpu_fast, self.rb_gpu_fastest,
+        )):
+            rb.setStyleSheet(
+                "QRadioButton { color: #ddd; font-size: 12px; "
+                "font-family: Menlo, monospace; padding: 2px 0; }"
+            )
+            self._gpu_tier_group.addButton(rb, i)
+            layout.addWidget(rb)
+        self._gpu_tier_keys = {
+            0: "cheapest", 1: "balanced", 2: "fast", 3: "fastest",
+        }
+
         # Train Locally — novelty option for users with very fast Macs (M5+)
         # or NVIDIA GPUs. Off by default; pod training is the recommended
         # path for everyone else.
@@ -233,6 +277,16 @@ class SettingsPage(QWidget):
             self.txt_spotify_secret.setText(config["spotify_client_secret"])
         # Train-locally toggle defaults to off; honour saved preference.
         self.chk_train_local.setChecked(bool(config.get("train_locally", False)))
+        # GPU tier — default 'cheapest' (A40), matching pre-picker behaviour.
+        tier = config.get("preferred_gpu_tier", "cheapest")
+        matched = False
+        for idx, key in self._gpu_tier_keys.items():
+            if key == tier:
+                self._gpu_tier_group.button(idx).setChecked(True)
+                matched = True
+                break
+        if not matched:
+            self.rb_gpu_cheapest.setChecked(True)
 
     def _save(self):
         api_key = self.txt_api_key.text().strip()
@@ -255,10 +309,14 @@ class SettingsPage(QWidget):
                 self.lbl_status.setStyleSheet("color: #ef4444;")
                 return
 
+        checked_id = self._gpu_tier_group.checkedId()
+        preferred_gpu_tier = self._gpu_tier_keys.get(checked_id, "cheapest")
+
         config_data = {
             "runpod_api_key": api_key,
             "ssh_key_path": ssh_key,
             "train_locally": train_locally,
+            "preferred_gpu_tier": preferred_gpu_tier,
         }
 
         spotify_id = self.txt_spotify_id.text().strip()
