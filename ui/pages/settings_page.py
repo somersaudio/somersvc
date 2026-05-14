@@ -174,7 +174,10 @@ class SettingsPage(QWidget):
         gpu_hint = QLabel(
             "Pick the GPU tier for training on RunPod. All four are "
             "compatible with the trainer; cheaper tiers take longer "
-            "but cost less per run."
+            "but cost less per run. GPU availability fluctuates "
+            "throughout the day — if your top pick is taken, the "
+            "trainer automatically tries the next-best option on the "
+            "same tier."
         )
         gpu_hint.setStyleSheet("color: rgba(255,255,255,90); font-size: 10px;")
         gpu_hint.setWordWrap(True)
