@@ -69,10 +69,18 @@ try:
     datas += collect_data_files('demucs')
 except Exception:
     pass
+# torchcrepe bundles its pitch-extraction model weights as .pth files
+# under torchcrepe/assets/. PyInstaller's default datas filter drops
+# them, so we collect_data_files explicitly with include_py_files=False
+# and also include .pth as a known asset extension via collect_all.
+try:
+    datas += collect_data_files('torchcrepe', include_py_files=False)
+except Exception:
+    pass
 
 # Packages with mypyc-compiled extensions or other surprise binaries — pull everything
 binaries = []
-for pkg in ('mypy', 'runpod', 'click', 'tomli', 'tomli_w'):
+for pkg in ('mypy', 'runpod', 'click', 'tomli', 'tomli_w', 'torchcrepe'):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -169,8 +177,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SomerSVC',
         'CFBundleDisplayName': 'SomerSVC',
-        'CFBundleShortVersionString': '1.0.28',
-        'CFBundleVersion': '1.0.28',
+        'CFBundleShortVersionString': '1.0.29',
+        'CFBundleVersion': '1.0.29',
         'NSHighResolutionCapable': 'True',
         'NSMicrophoneUsageDescription': 'SomerSVC needs microphone access for realtime voice conversion.',
         'NSAppleEventsUsageDescription': 'SomerSVC uses Apple Events for output folder access.',
