@@ -5318,11 +5318,19 @@ class SimplePage(QWidget):
             }
         """)
         self._btn_optimize.clicked.connect(self._optimize_sections)
-        opt_row = QHBoxLayout()
+        # Wrap the optimize row in a QWidget so we can hide the whole
+        # container — Qt collapses layout spacing around hidden widgets
+        # but not around bare sub-layouts, which used to leave ~32px of
+        # dead space between the waveform and the Convert button on any
+        # clip short enough to be a single section.
+        self._opt_container = QWidget()
+        opt_row = QHBoxLayout(self._opt_container)
+        opt_row.setContentsMargins(0, 0, 0, 0)
         opt_row.addStretch()
         opt_row.addWidget(self._btn_optimize)
         opt_row.addStretch()
-        layout.addLayout(opt_row)
+        self._opt_container.setVisible(False)
+        layout.addWidget(self._opt_container)
 
         # Pitch info
         self._lbl_pitch = QLabel("")
@@ -5820,12 +5828,15 @@ class SimplePage(QWidget):
             if self._waveform._samples:
                 # Already have data — just show it
                 self._waveform.setVisible(True)
-                self._btn_optimize.setVisible(len(self._waveform._sections) > 1)
+                vis = len(self._waveform._sections) > 1
+                self._btn_optimize.setVisible(vis)
+                self._opt_container.setVisible(vis)
             else:
                 self._analyze_waveform()
         elif not checked:
             self._waveform.hide_and_stop()
             self._btn_optimize.setVisible(False)
+            self._opt_container.setVisible(False)
             self._lbl_pitch.setVisible(False)
 
     def _make_realtime_icon(self, active: bool) -> QPixmap:
@@ -6030,6 +6041,7 @@ class SimplePage(QWidget):
         self._drop_zone.setStyleSheet(self._drop_zone_default_style)
         self._btn_clear_source.setVisible(False)
         self._btn_optimize.setVisible(False)
+        self._opt_container.setVisible(False)
         self._hide_spinner()
         self._waveform.clear()
         self._lbl_pitch.setText("")
@@ -6135,7 +6147,9 @@ class SimplePage(QWidget):
         # Only apply if this is still the active worker
         if samples:
             self._waveform.set_data(samples, sections, transposes, median_hz, self._model_center_hz)
-            self._btn_optimize.setVisible(len(sections) > 1)
+            vis = len(sections) > 1
+            self._btn_optimize.setVisible(vis)
+            self._opt_container.setVisible(vis)
             self._optimized_for_model = self._selected_model_idx
             self._mark_optimize_clean()
 
