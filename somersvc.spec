@@ -118,6 +118,15 @@ a = Analysis(
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
+    # TorchScript (@torch.jit.script) requires access to the original .py
+    # source files at runtime to compile decorated functions. PyInstaller
+    # bundles modules as .pyc by default, which breaks svc-fork's
+    # fused_add_tanh_sigmoid_multiply on import. Force source-mode
+    # bundling for the affected packages.
+    module_collection_mode={
+        'so_vits_svc_fork': 'py',
+        'torch': 'pyz+py',
+    },
 )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
@@ -160,8 +169,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SomerSVC',
         'CFBundleDisplayName': 'SomerSVC',
-        'CFBundleShortVersionString': '1.0.27',
-        'CFBundleVersion': '1.0.27',
+        'CFBundleShortVersionString': '1.0.28',
+        'CFBundleVersion': '1.0.28',
         'NSHighResolutionCapable': 'True',
         'NSMicrophoneUsageDescription': 'SomerSVC needs microphone access for realtime voice conversion.',
         'NSAppleEventsUsageDescription': 'SomerSVC uses Apple Events for output folder access.',
