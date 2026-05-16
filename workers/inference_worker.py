@@ -19,6 +19,7 @@ class InferenceWorker(QThread):
     error = pyqtSignal(str)
     section_results = pyqtSignal(list)  # list of dicts with per-section info
     cache_ready = pyqtSignal(dict)  # section cache for incremental re-renders
+    transpose_used = pyqtSignal(int)  # representative semitone shift applied
 
     def __init__(
         self,
@@ -262,6 +263,7 @@ class InferenceWorker(QThread):
                     log(f"Whole-clip pitch analysis failed ({e}); "
                         f"using transpose {t:+d}")
                 log(f"Whole-clip transpose: {t:+d} semitones")
+                self.transpose_used.emit(int(t))
                 original_transpose = self.transpose
                 self.transpose = t
                 try:
@@ -296,6 +298,7 @@ class InferenceWorker(QThread):
             from ui.pages.inference_page import _hz_to_note
             model_note = _hz_to_note(self.model_center_hz)
             log(f"Base transpose: {base:+d} semitones (to match {model_note})")
+            self.transpose_used.emit(int(base))
 
             import math
             results = []
