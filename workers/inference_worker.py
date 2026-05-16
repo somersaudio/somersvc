@@ -246,12 +246,31 @@ class InferenceWorker(QThread):
                 log(f"Found {len(sections)} sections")
 
             if len(sections) <= 1:
-                # No splits found — fall back to normal inference
-                log("No section breaks detected — using standard transpose")
-                if self.model_type == "rvc":
-                    converted = self._run_rvc(process_path, log)
-                else:
-                    converted = self._run_svc(process_path, log)
+                # No section breaks — analyze the whole clip's pitch and
+                # shift it to the model's range here, rather than trusting
+                # the passed-in transpose. The batch runner passes 0 and
+                # relies entirely on this path; single-file passes the
+                # same value this computes, so its behaviour is unchanged.
+                log("No section breaks detected — matching whole-clip pitch")
+                t = self.transpose
+                try:
+                    info = analyze_section_pitches([process_path])
+                    info = calculate_section_transposes(info, self.model_center_hz)
+                    if info:
+                        t = info[0].get("transpose", t)
+                except Exception as e:
+                    log(f"Whole-clip pitch analysis failed ({e}); "
+                        f"using transpose {t:+d}")
+                log(f"Whole-clip transpose: {t:+d} semitones")
+                original_transpose = self.transpose
+                self.transpose = t
+                try:
+                    if self.model_type == "rvc":
+                        converted = self._run_rvc(process_path, log)
+                    else:
+                        converted = self._run_svc(process_path, log)
+                finally:
+                    self.transpose = original_transpose
 
                 if instrumentals_path:
                     self._remix(converted, instrumentals_path, output_path, log)
