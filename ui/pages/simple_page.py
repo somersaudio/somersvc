@@ -237,6 +237,96 @@ class _WaveformSamplesOnly(QThread):
             self.finished.emit([])
 
 
+class _ClipProcessWorker(QThread):
+    """Background: copy each uploaded file into the app's own staging
+    folder, split it into ~7s training clips, and flag silent ones.
+
+    The user's original dropped files are never modified or deleted —
+    everything happens on copies under CACHE_DIR/clip_staging/.
+    """
+
+    file_done = pyqtSignal(dict)   # one processed-file record
+    all_done = pyqtSignal()
+
+    CHUNK_SEC = 7.0
+    TAIL_MERGE_SEC = 3.0     # a trailing remnant shorter than this is merged
+    SPLIT_MIN_SEC = 10.0     # files at/under this are kept whole (one clip)
+    SILENCE_RMS = 0.003      # ~-50 dBFS — below this a clip counts as silent
+
+    def __init__(self, paths, staging_root):
+        super().__init__()
+        self._paths = list(paths)
+        self._staging_root = staging_root
+
+    def run(self):
+        for path in self._paths:
+            try:
+                rec = self._process_one(path)
+            except Exception as e:
+                rec = {"name": os.path.basename(path), "source": path,
+                       "clips": [], "error": str(e)}
+            self.file_done.emit(rec)
+        self.all_done.emit()
+
+    def _process_one(self, path: str) -> dict:
+        import tempfile
+        import numpy as np
+        import soundfile as sf
+
+        os.makedirs(self._staging_root, exist_ok=True)
+        work_dir = tempfile.mkdtemp(prefix="clip_", dir=self._staging_root)
+        stem = os.path.splitext(os.path.basename(path))[0]
+
+        audio, sr = sf.read(path)
+        if getattr(audio, "ndim", 1) > 1 and audio.shape[1] > 1:
+            audio = audio.mean(axis=1)
+        total = len(audio)
+        duration = total / sr if sr else 0.0
+
+        clip_paths = []
+        if duration <= self.SPLIT_MIN_SEC:
+            # Short enough to use as-is — one clip, no split.
+            cp = os.path.join(work_dir, f"{stem}_part01.wav")
+            sf.write(cp, audio, sr)
+            clip_paths.append(cp)
+        else:
+            chunk = int(self.CHUNK_SEC * sr)
+            tail_min = int(self.TAIL_MERGE_SEC * sr)
+            pos, idx = 0, 1
+            while pos < total:
+                end = min(pos + chunk, total)
+                if 0 < (total - end) < tail_min:
+                    end = total  # absorb a too-short tail into this chunk
+                cp = os.path.join(work_dir, f"{stem}_part{idx:02d}.wav")
+                sf.write(cp, audio[pos:end], sr)
+                clip_paths.append(cp)
+                idx += 1
+                pos = end
+
+        clips = [{"path": cp, "silent": self._is_silent(cp)}
+                 for cp in clip_paths]
+        return {"name": os.path.basename(path), "source": path,
+                "staged_dir": work_dir, "clips": clips, "error": ""}
+
+    def _is_silent(self, path: str) -> bool:
+        """RMS over the first ~10s below ~-50 dBFS — too quiet to train on."""
+        import numpy as np
+        import soundfile as sf
+        try:
+            with sf.SoundFile(path) as f:
+                n = min(f.frames, f.samplerate * 10)
+                if n <= 0:
+                    return True
+                data = f.read(n, dtype="float32")
+            if getattr(data, "ndim", 1) > 1:
+                data = data.mean(axis=1)
+            if data.size == 0:
+                return True
+            return float(np.sqrt(np.mean(data ** 2))) < self.SILENCE_RMS
+        except Exception:
+            return False
+
+
 class _WaveformWidget(QWidget):
     """Waveform with section splits, transpose coloring, and built-in audio playback."""
 
@@ -2100,6 +2190,10 @@ class _CreateModelPanel(QWidget):
 
         # State
         self._clips = []
+        # Grouped clip model: one record per uploaded file —
+        # {name, source, staged_dir, clips:[{path,silent}], error}.
+        self._processed_files = []
+        self._clip_workers = []
         self._selected_name = ""
         self._training = False
         self._worker = None
@@ -2141,15 +2235,51 @@ class _CreateModelPanel(QWidget):
             self._add_clips(paths)
 
     def _add_clips(self, paths):
-        self._clips.extend(paths)
+        """Uploaded audio is auto-processed in the background — copied
+        into the app's staging area, split into ~7s training clips, and
+        silent clips flagged. The user's original files are never
+        modified or deleted."""
+        if not paths:
+            return
+        staging_root = os.path.join(CACHE_DIR, "clip_staging")
+        worker = _ClipProcessWorker(paths, staging_root)
+        worker.file_done.connect(self._on_clip_file_processed)
+        worker.all_done.connect(
+            lambda w=worker: self._on_clip_processing_done(w)
+        )
+        self._clip_workers.append(worker)
+        self._show_toast("Processing audio…")
+        worker.start()
+
+    def _on_clip_file_processed(self, rec: dict):
+        """One uploaded file finished processing — record it and add its
+        non-silent clips to the training set."""
+        self._processed_files.append(rec)
+        if rec.get("error"):
+            self._show_toast(f"Couldn't process {rec.get('name', 'file')}")
+            return
+        # Step 1: feed the non-silent clips into the flat list the UI and
+        # trainer already use. Grouped display lands in step 2.
+        for c in rec.get("clips", []):
+            if not c.get("silent"):
+                self._clips.append(c["path"])
         self._refresh_file_list()
-        # Persist staged clips for pending (untrained, no dataset on disk)
-        # artists so closing the Create panel and reopening it doesn't lose
-        # the work.
-        from services.paths import DATASETS_DIR
+        # Persist staged clips for pending (untrained, no dataset on
+        # disk) artists so closing/reopening the panel keeps the work.
         name = (self._selected_name or "").strip()
         if name and not os.path.isdir(os.path.join(str(DATASETS_DIR), name)):
             self._pending_clips_by_artist[name] = list(self._clips)
+
+    def _on_clip_processing_done(self, worker):
+        """A processing worker finished — wait for the thread to fully
+        exit before dropping the reference (a bare drop mid-teardown
+        would hit QThread's 'destroyed while running' abort)."""
+        try:
+            worker.wait(5000)
+        except Exception:
+            pass
+        if worker in self._clip_workers:
+            self._clip_workers.remove(worker)
 
     def _filter_silent_clips(self, paths: list) -> tuple[list, int]:
         """Return (kept_paths, removed_count). A clip is "silent" when its
