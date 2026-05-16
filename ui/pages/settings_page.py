@@ -62,6 +62,9 @@ class SettingsPage(QWidget):
         self._setup_worker = None
         self._init_ui()
         self._load_saved()
+        # Wired after _load_saved() so populating the fields doesn't
+        # itself trigger a save.
+        self._wire_autosave()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -233,13 +236,13 @@ class SettingsPage(QWidget):
         local_hint.setWordWrap(True)
         layout.addWidget(local_hint)
 
-        # Save button
+        # No Save button — every field persists the moment it changes.
         layout.addSpacing(24)
-        self.btn_save = QPushButton("Save Settings")
-        self.btn_save.setObjectName("primary")
-        self.btn_save.setFixedWidth(160)
-        self.btn_save.clicked.connect(self._save)
-        layout.addWidget(self.btn_save)
+        autosave_hint = QLabel("Changes are saved automatically.")
+        autosave_hint.setStyleSheet(
+            "color: rgba(255,255,255,90); font-size: 11px;"
+        )
+        layout.addWidget(autosave_hint)
 
         # Status label
         self.lbl_status = QLabel("")
@@ -289,47 +292,56 @@ class SettingsPage(QWidget):
         if not matched:
             self.rb_gpu_cheapest.setChecked(True)
 
-    def _save(self):
-        api_key = self.txt_api_key.text().strip()
-        ssh_key = self.txt_ssh_key.text().strip()
-        train_locally = self.chk_train_local.isChecked()
+    def _wire_autosave(self):
+        """Persist every change immediately — no Save button needed.
 
-        # When training locally, we don't strictly need RunPod creds — but
-        # keep the validation so the user can still flip it off later.
-        if not api_key and not train_locally:
-            self.lbl_status.setText("Please enter your RunPod API key")
-            self.lbl_status.setStyleSheet("color: #ef4444;")
-            return
+        Text fields save on editingFinished (focus-out / Enter), so a
+        save fires once per completed edit rather than per keystroke.
+        Radios and the checkbox save the instant they toggle.
+        """
+        for line_edit in (
+            self.txt_api_key,
+            self.txt_ssh_key,
+            self.txt_spotify_id,
+            self.txt_spotify_secret,
+        ):
+            line_edit.editingFinished.connect(self._autosave)
+        # buttonClicked fires once per user pick (not on programmatic
+        # setChecked), so loading the saved tier never triggers a save.
+        self._gpu_tier_group.buttonClicked.connect(self._autosave)
+        self.chk_train_local.toggled.connect(self._autosave)
 
-        if api_key:
-            ssh_path = os.path.expanduser(ssh_key) if ssh_key else ""
-            if ssh_key and not os.path.exists(ssh_path):
-                self.lbl_status.setText(
-                    f"SSH key not found: {ssh_path}. Click 'Auto-Setup SSH Key' to generate one."
-                )
-                self.lbl_status.setStyleSheet("color: #ef4444;")
-                return
-
+    def _persist_config(self):
+        """Write the current field state to disk. The field state is the
+        source of truth — this always persists, even half-finished setups,
+        and never blocks on validation."""
         checked_id = self._gpu_tier_group.checkedId()
-        preferred_gpu_tier = self._gpu_tier_keys.get(checked_id, "cheapest")
-
         config_data = {
-            "runpod_api_key": api_key,
-            "ssh_key_path": ssh_key,
-            "train_locally": train_locally,
-            "preferred_gpu_tier": preferred_gpu_tier,
+            "runpod_api_key": self.txt_api_key.text().strip(),
+            "ssh_key_path": self.txt_ssh_key.text().strip(),
+            "train_locally": self.chk_train_local.isChecked(),
+            "preferred_gpu_tier": self._gpu_tier_keys.get(checked_id, "cheapest"),
+            # Always written (even when empty) so clearing a field sticks.
+            "spotify_client_id": self.txt_spotify_id.text().strip(),
+            "spotify_client_secret": self.txt_spotify_secret.text().strip(),
         }
-
-        spotify_id = self.txt_spotify_id.text().strip()
-        spotify_secret = self.txt_spotify_secret.text().strip()
-        if spotify_id:
-            config_data["spotify_client_id"] = spotify_id
-        if spotify_secret:
-            config_data["spotify_client_secret"] = spotify_secret
-
         save_config(config_data)
-        self.lbl_status.setText("Settings saved!")
-        self.lbl_status.setStyleSheet("color: #22c55e;")
+
+    def _autosave(self):
+        """Persist on any field change and give gentle, non-blocking
+        feedback. Wired to every input by _wire_autosave()."""
+        self._persist_config()
+
+        ssh_key = self.txt_ssh_key.text().strip()
+        if ssh_key and not os.path.exists(os.path.expanduser(ssh_key)):
+            self.lbl_status.setText(
+                "Saved — but that SSH key path doesn't exist yet. "
+                "Click 'Auto-Setup SSH Key' to generate one."
+            )
+            self.lbl_status.setStyleSheet("color: #f59e0b;")
+        else:
+            self.lbl_status.setText("Settings saved automatically")
+            self.lbl_status.setStyleSheet("color: #22c55e;")
 
     def _test_connection(self):
         api_key = self.txt_api_key.text().strip()
@@ -399,8 +411,9 @@ class SettingsPage(QWidget):
         else:
             self.lbl_status.setStyleSheet("color: #f59e0b;")
         self.btn_auto_setup.setEnabled(True)
-        # Save automatically so they don't have to click Save Settings
-        self._save()
+        # Persist the generated SSH path without clobbering the
+        # auto-setup result message above.
+        self._persist_config()
 
     def _on_setup_failed(self, error: str):
         self.lbl_status.setText(error)
