@@ -5178,6 +5178,14 @@ class _ConvertQueueRow(QWidget):
         self._name.setToolTip(path)
         row.addWidget(self._name, 1)
 
+        # Status word — shows "Queued" while a file waits its turn.
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet(
+            "color: #888; font-size: 10px; background: transparent;"
+        )
+        self._status_lbl.setVisible(False)
+        row.addWidget(self._status_lbl)
+
         # How many sections Range-Match split the clip into — filled in
         # mid-conversion, teal so it reads as a result, not a control.
         self._sections_lbl = QLabel("")
@@ -5243,6 +5251,9 @@ class _ConvertQueueRow(QWidget):
             )
         else:
             self.setStyleSheet("")
+        # "Queued" marks a file still waiting to be converted.
+        self._status_lbl.setText("Queued" if status == "queued" else "")
+        self._status_lbl.setVisible(status == "queued")
         self._refresh_buttons()
 
     def _refresh_buttons(self):
@@ -7579,19 +7590,30 @@ class SimplePage(QWidget):
     def _add_sources(self, paths):
         """Queue one or more audio files for conversion. A single file
         is the classic single-file flow; 2+ switches to the batch
-        queue list. New, non-duplicate paths are appended in order."""
-        added = False
+        queue list. New, non-duplicate paths are appended in order.
+
+        If a batch is already running, the new files fold into it —
+        they convert with the current run, no second Convert click."""
+        added = []
         for p in paths:
             if p and p not in self._source_paths:
                 self._source_paths.append(p)
-                added = True
-        if added:
-            self._sync_convert_view()
+                added.append(p)
+        if not added:
+            return
+        if self._batch_running:
+            self._batch_files.extend(added)
+        self._sync_convert_view()
 
     def _remove_source(self, path):
         """Drop one file from the batch queue (a row's × button)."""
         if path in self._source_paths:
             self._source_paths.remove(path)
+            # The × only shows on still-queued rows, so a removal
+            # mid-batch is always a not-yet-converted file — safe to
+            # pull from the live run without disturbing the index.
+            if self._batch_running and path in self._batch_files:
+                self._batch_files.remove(path)
             self._sync_convert_view()
 
     def _sync_convert_view(self):
@@ -7615,7 +7637,6 @@ class SimplePage(QWidget):
             return
         # Batch mode — the queue list stands in for the waveform editor.
         self._convert_queue.set_files(self._source_paths)
-        self._convert_queue.set_header(f"{n} files queued")
         self._convert_queue.setVisible(True)
         self._btn_clear_source.setVisible(True)
         self._waveform.setVisible(False)
@@ -7624,7 +7645,13 @@ class SimplePage(QWidget):
         self._lbl_pitch.setVisible(False)
         self._btn_optimize.setVisible(False)
         self._opt_container.setVisible(False)
-        self._hide_spinner()
+        # Mid-run, leave the live "Converting…" header and the spinner
+        # alone — set_files already slotted the new rows in as Queued
+        # and _batch_files has been extended, so they convert with the
+        # current batch.
+        if not self._batch_running:
+            self._convert_queue.set_header(f"{n} files queued")
+            self._hide_spinner()
         self._drop_zone.setText(f"♪  {n} files queued — drop more to add")
         self._drop_zone.setStyleSheet("""
             QLabel {
