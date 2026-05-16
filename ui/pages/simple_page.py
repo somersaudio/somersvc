@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
@@ -5023,11 +5024,144 @@ class _CreateModelPanel(QWidget):
         self.training_stopped.emit()
 
 
+class _ConvertQueueRow(QWidget):
+    """One file row in the batch-convert queue list.
+
+    Carries a status the runner drives later (queued → converting →
+    done/failed); for now every row is just 'queued'. The status maps
+    to a coloured dot + filename so completion reads at a glance.
+    """
+    remove_requested = pyqtSignal(str)  # emits this row's path
+
+    # status -> (dot glyph, text colour, dot colour)
+    _STATUS = {
+        "queued":     ("○", "#888888", "rgba(255,255,255,40)"),
+        "converting": ("◐", "#cfd8ff", "#5e8cff"),
+        "done":       ("●", "#4ade80", "#4ade80"),
+        "failed":     ("●", "#ef4444", "#ef4444"),
+    }
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.status = "queued"
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 5, 8, 5)
+        row.setSpacing(8)
+
+        self._dot = QLabel()
+        self._dot.setFixedWidth(14)
+        row.addWidget(self._dot)
+
+        self._name = QLabel(os.path.basename(path))
+        self._name.setToolTip(path)
+        row.addWidget(self._name, 1)
+
+        self._btn_remove = QPushButton("×")
+        self._btn_remove.setFixedSize(18, 18)
+        self._btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_remove.setStyleSheet(
+            "QPushButton { background: rgba(255,255,255,10); border: none;"
+            " border-radius: 9px; color: #888; font-size: 12px; padding: 0; }"
+            "QPushButton:hover { background: rgba(255,255,255,20); color: #ccc; }"
+        )
+        self._btn_remove.clicked.connect(
+            lambda: self.remove_requested.emit(self.path)
+        )
+        row.addWidget(self._btn_remove)
+
+        self.set_status("queued")
+
+    def set_status(self, status: str):
+        self.status = status
+        glyph, text_color, dot_color = self._STATUS.get(
+            status, self._STATUS["queued"]
+        )
+        self._dot.setText(glyph)
+        self._dot.setStyleSheet(
+            f"color: {dot_color}; font-size: 11px; background: transparent;"
+        )
+        weight = "600" if status in ("converting", "done") else "400"
+        self._name.setStyleSheet(
+            f"color: {text_color}; font-size: 12px; font-weight: {weight};"
+            " background: transparent;"
+        )
+        # Removing a file only makes sense while it's still waiting.
+        self._btn_remove.setVisible(status == "queued")
+
+
+class _ConvertQueueList(QWidget):
+    """Scrollable list of files queued for batch conversion. Shown in
+    place of the waveform editor when 2+ files are loaded."""
+    remove_requested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows: dict[str, _ConvertQueueRow] = {}
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setMaximumHeight(220)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._scroll.setStyleSheet(
+            "QScrollArea { background: rgba(255,255,255,3);"
+            " border: 1px solid rgba(255,255,255,10); border-radius: 12px; }"
+        )
+
+        self._inner = QWidget()
+        self._list_layout = QVBoxLayout(self._inner)
+        self._list_layout.setContentsMargins(4, 4, 4, 4)
+        self._list_layout.setSpacing(2)
+        self._list_layout.addStretch()  # keep rows top-aligned
+        self._scroll.setWidget(self._inner)
+        outer.addWidget(self._scroll)
+
+    def set_files(self, paths: list):
+        """Rebuild the list to match `paths`, carrying over the status
+        of any row whose path is unchanged."""
+        prev = {p: r.status for p, r in self._rows.items()}
+        self._rows = {}
+        # Drop existing row widgets, keeping the trailing stretch item.
+        while self._list_layout.count() > 1:
+            item = self._list_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        for p in paths:
+            row = _ConvertQueueRow(p)
+            if p in prev:
+                row.set_status(prev[p])
+            row.remove_requested.connect(self.remove_requested)
+            self._list_layout.insertWidget(
+                self._list_layout.count() - 1, row
+            )
+            self._rows[p] = row
+
+    def row(self, path: str):
+        return self._rows.get(path)
+
+    def set_status(self, path: str, status: str):
+        row = self._rows.get(path)
+        if row is not None:
+            row.set_status(status)
+
+    def clear(self):
+        self.set_files([])
+
+
 class SimplePage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker = None
         self._original_source = ""
+        self._source_paths = []  # batch convert queue (raw file paths)
         self._section_cache = {}
         self._selected_model_idx = -1
         self._optimized_for_model = -1  # model idx the waveform was last optimized for
@@ -5301,6 +5435,13 @@ class SimplePage(QWidget):
         layout.addWidget(self._waveform)
         self._active_waveform = self._waveform  # default
         self._waveform_worker = None
+
+        # Batch-convert queue — replaces the waveform editor when 2+
+        # files are loaded. Hidden in the single-file flow.
+        self._convert_queue = _ConvertQueueList()
+        self._convert_queue.remove_requested.connect(self._remove_source)
+        self._convert_queue.setVisible(False)
+        layout.addWidget(self._convert_queue)
 
 
         # Optimize button (appears below waveform when sections exist)
@@ -6042,6 +6183,7 @@ class SimplePage(QWidget):
     def _clear_source(self):
         self._source_path = ""
         self._original_source = ""
+        self._source_paths = []
         self._source_median_hz = 0
         self._section_cache = {}
         # Clean up section cache files
@@ -6055,6 +6197,11 @@ class SimplePage(QWidget):
         self._btn_optimize.setVisible(False)
         self._opt_container.setVisible(False)
         self._hide_spinner()
+        # Drop the batch queue and restore the single-file view.
+        self._convert_queue.clear()
+        self._convert_queue.setVisible(False)
+        self._waveform.setVisible(True)
+        self._lbl_pitch.setVisible(True)
         self._waveform.clear()
         self._lbl_pitch.setText("")
         self._waveform_output.hide_and_stop()
@@ -6064,12 +6211,12 @@ class SimplePage(QWidget):
         QTimer.singleShot(50, self._position_bottom_panel)
 
     def _browse_source(self):
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self, "Select Audio", "",
             "Audio Files (*.wav *.flac *.mp3 *.ogg);;All Files (*)",
         )
-        if path:
-            self._load_source(path)
+        if paths:
+            self._add_sources(paths)
 
     def _on_pitch_result(self, text, median_hz):
         self._lbl_pitch.setText(text)
@@ -6331,6 +6478,16 @@ class SimplePage(QWidget):
             self._waveform.set_active_section(-1)
             self._waveform.set_progress(0.0)
             self._log.append_line("Cancelled.")
+            return
+
+        # Batch mode — the sequential runner lands in the next step.
+        if len(self._source_paths) >= 2:
+            QMessageBox.information(
+                self, "Batch Convert",
+                f"{len(self._source_paths)} files are queued. Running the "
+                "whole batch is being wired up next — for now, queue a "
+                "single file to convert.",
+            )
             return
 
         if self._cmb_model.count() == 0 or not self._cmb_model.currentData():
@@ -6786,12 +6943,12 @@ class SimplePage(QWidget):
 
     def dropEvent(self, event):
         self._drop_zone.setStyleSheet(self._drop_zone_default_style)
-        urls = event.mimeData().urls()
-        for url in urls:
-            path = url.toLocalFile()
-            if path.lower().endswith((".wav", ".flac", ".mp3", ".ogg")):
-                self._load_source(path)
-                return
+        paths = [
+            u.toLocalFile() for u in event.mimeData().urls()
+            if u.toLocalFile().lower().endswith((".wav", ".flac", ".mp3", ".ogg"))
+        ]
+        if paths:
+            self._add_sources(paths)
 
     def _stop_workers(self):
         """Disconnect old workers so their results are ignored. Don't wait — let them finish quietly."""
@@ -6812,6 +6969,66 @@ class SimplePage(QWidget):
                     worker.finished.connect(lambda w=worker: self._old_workers.remove(w) if w in self._old_workers else None)
                 setattr(self, attr, None)
 
+
+    def _add_sources(self, paths):
+        """Queue one or more audio files for conversion. A single file
+        is the classic single-file flow; 2+ switches to the batch
+        queue list. New, non-duplicate paths are appended in order."""
+        added = False
+        for p in paths:
+            if p and p not in self._source_paths:
+                self._source_paths.append(p)
+                added = True
+        if added:
+            self._sync_convert_view()
+
+    def _remove_source(self, path):
+        """Drop one file from the batch queue (a row's × button)."""
+        if path in self._source_paths:
+            self._source_paths.remove(path)
+            self._sync_convert_view()
+
+    def _sync_convert_view(self):
+        """Keep the convert UI in step with self._source_paths: the
+        single-file waveform editor for exactly one file, the batch
+        queue list for 2+, a full reset for none."""
+        n = len(self._source_paths)
+        if n == 0:
+            self._clear_source()
+            return
+        if n == 1:
+            # Single-file mode — today's behaviour, untouched. Only
+            # reload if the lone file actually changed.
+            self._convert_queue.setVisible(False)
+            self._convert_queue.clear()
+            self._waveform.setVisible(True)
+            self._lbl_pitch.setVisible(True)
+            only = self._source_paths[0]
+            if self._original_source != only:
+                self._load_source(only)
+            return
+        # Batch mode — the queue list stands in for the waveform editor.
+        self._convert_queue.set_files(self._source_paths)
+        self._convert_queue.setVisible(True)
+        self._btn_clear_source.setVisible(True)
+        self._waveform.setVisible(False)
+        self._waveform_output.hide_and_stop()
+        self._lbl_output_name.setVisible(False)
+        self._lbl_pitch.setVisible(False)
+        self._btn_optimize.setVisible(False)
+        self._opt_container.setVisible(False)
+        self._hide_spinner()
+        self._drop_zone.setText(f"♪  {n} files queued — drop more to add")
+        self._drop_zone.setStyleSheet("""
+            QLabel {
+                background-color: rgba(37, 99, 235, 8);
+                border: 1px solid rgba(37, 99, 235, 25);
+                border-radius: 12px;
+                color: #aaa;
+                font-size: 12px;
+            }
+        """)
+        QTimer.singleShot(50, self._position_bottom_panel)
 
     def _load_source(self, path):
         """Load a source audio file."""
