@@ -5033,6 +5033,7 @@ class _ConvertQueueRow(QWidget):
     faint highlight and an animated dot.
     """
     remove_requested = pyqtSignal(str)  # emits this row's path
+    play_requested = pyqtSignal(str)    # emits this row's path (▶ click)
 
     # status -> (dot glyph, text colour, dot colour)
     _STATUS = {
@@ -5048,6 +5049,7 @@ class _ConvertQueueRow(QWidget):
         super().__init__(parent)
         self.path = path
         self.status = "queued"
+        self.output_path = ""  # converted file, set once this row is done
         self._spin_idx = 0
         # Required for the converting-row highlight to actually paint.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -5063,6 +5065,21 @@ class _ConvertQueueRow(QWidget):
         self._name = QLabel(os.path.basename(path))
         self._name.setToolTip(path)
         row.addWidget(self._name, 1)
+
+        # ▶ to preview the converted result — shown only on done rows.
+        self._btn_play = QPushButton("▶")
+        self._btn_play.setFixedSize(18, 18)
+        self._btn_play.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_play.setStyleSheet(
+            "QPushButton { background: rgba(74,222,128,20); border: none;"
+            " border-radius: 9px; color: #4ade80; font-size: 9px; padding: 0; }"
+            "QPushButton:hover { background: rgba(74,222,128,36); }"
+        )
+        self._btn_play.clicked.connect(
+            lambda: self.play_requested.emit(self.path)
+        )
+        self._btn_play.setVisible(False)
+        row.addWidget(self._btn_play)
 
         self._btn_remove = QPushButton("×")
         self._btn_remove.setFixedSize(18, 18)
@@ -5104,8 +5121,22 @@ class _ConvertQueueRow(QWidget):
             )
         else:
             self.setStyleSheet("")
-        # Removing a file only makes sense while it's still waiting.
-        self._btn_remove.setVisible(status == "queued")
+        self._refresh_buttons()
+
+    def _refresh_buttons(self):
+        # Remove only while queued; play only once a result exists.
+        self._btn_remove.setVisible(self.status == "queued")
+        self._btn_play.setVisible(
+            self.status == "done" and bool(self.output_path)
+        )
+
+    def set_output(self, output_path: str):
+        """Attach the converted file so the row can offer playback."""
+        self.output_path = output_path or ""
+        self._refresh_buttons()
+
+    def set_playing(self, playing: bool):
+        self._btn_play.setText("⏸" if playing else "▶")
 
     def tick_spinner(self):
         """Advance the converting-row dot by one animation frame."""
@@ -5161,6 +5192,16 @@ class _ConvertQueueList(QWidget):
         self._spin_timer.setInterval(130)
         self._spin_timer.timeout.connect(self._tick_spinner)
 
+        # Shared player for per-row result playback — one file at a time.
+        from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+        from services.audio_device_tracker import register_audio_output
+        self._player = QMediaPlayer(self)
+        self._audio_out = QAudioOutput(self)
+        register_audio_output(self._audio_out)
+        self._player.setAudioOutput(self._audio_out)
+        self._player.playbackStateChanged.connect(self._on_play_state)
+        self._playing_path = None
+
     def set_header(self, text: str):
         """Set the line above the list (accepts rich text for colour)."""
         self._header.setText(text)
@@ -5173,10 +5214,41 @@ class _ConvertQueueList(QWidget):
         for r in active:
             r.tick_spinner()
 
+    def _on_row_play(self, path: str):
+        """Play — or pause/resume — the converted result for a row."""
+        row = self._rows.get(path)
+        if row is None or not row.output_path:
+            return
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtMultimedia import QMediaPlayer
+        if self._playing_path == path:
+            # Same file — toggle pause/resume.
+            if (self._player.playbackState()
+                    == QMediaPlayer.PlaybackState.PlayingState):
+                self._player.pause()
+            else:
+                self._player.play()
+            return
+        # Different file — stop the old one, start this one.
+        self._player.stop()
+        old = self._rows.get(self._playing_path)
+        if old is not None:
+            old.set_playing(False)
+        self._playing_path = path
+        self._player.setSource(QUrl.fromLocalFile(row.output_path))
+        self._player.play()
+
+    def _on_play_state(self, state):
+        from PyQt6.QtMultimedia import QMediaPlayer
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        row = self._rows.get(self._playing_path)
+        if row is not None:
+            row.set_playing(playing)
+
     def set_files(self, paths: list):
         """Rebuild the list to match `paths`, carrying over the status
-        of any row whose path is unchanged."""
-        prev = {p: r.status for p, r in self._rows.items()}
+        and converted-output path of any row whose path is unchanged."""
+        prev = {p: (r.status, r.output_path) for p, r in self._rows.items()}
         self._rows = {}
         # Drop existing row widgets, keeping the trailing stretch item.
         while self._list_layout.count() > 1:
@@ -5187,8 +5259,12 @@ class _ConvertQueueList(QWidget):
         for p in paths:
             row = _ConvertQueueRow(p)
             if p in prev:
-                row.set_status(prev[p])
+                status, out = prev[p]
+                row.set_status(status)
+                if out:
+                    row.set_output(out)
             row.remove_requested.connect(self.remove_requested)
+            row.play_requested.connect(self._on_row_play)
             self._list_layout.insertWidget(
                 self._list_layout.count() - 1, row
             )
@@ -5197,15 +5273,22 @@ class _ConvertQueueList(QWidget):
     def row(self, path: str):
         return self._rows.get(path)
 
-    def set_status(self, path: str, status: str):
+    def set_status(self, path: str, status: str, output_path: str = None):
         row = self._rows.get(path)
         if row is not None:
             row.set_status(status)
+            if output_path:
+                row.set_output(output_path)
         if status == "converting" and not self._spin_timer.isActive():
             self._spin_timer.start()
 
     def clear(self):
         self._spin_timer.stop()
+        try:
+            self._player.stop()
+        except Exception:
+            pass
+        self._playing_path = None
         self.set_files([])
         self._header.setText("")
 
@@ -6857,8 +6940,8 @@ class SimplePage(QWidget):
         if not self._batch_running:
             return
         path = self._batch_files[self._batch_index]
-        self._convert_queue.set_status(path, "done")
         self._batch_results[path] = output_path
+        self._convert_queue.set_status(path, "done", output_path)
         self._batch_done += 1
         self._log.append_line(f"  ✓ {os.path.basename(output_path)}")
         self._worker = None
