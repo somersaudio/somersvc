@@ -615,20 +615,17 @@ class _WaveformWidget(QWidget):
 
     def _color_for_distance(self, dist, alpha_bg=50, alpha_bar=160):
         """Green/yellow/orange based on match quality. Neutral for unknown.
-        Output (readonly) waveform uses darker, muted versions."""
-        darken = self._readonly
+        Source and output waveforms render identically."""
         if dist >= 99:
-            if darken:
-                return QColor(255, 255, 255, 0), QColor(140, 140, 140, 100)
             return QColor(255, 255, 255, 0), QColor(200, 200, 200, 130)
         elif dist <= 3:
-            r, g, b = (50, 140, 80) if darken else (80, 200, 120)
+            r, g, b = 80, 200, 120
             return QColor(r, g, b, alpha_bg), QColor(r, g, b, alpha_bar)
         elif dist <= 6:
-            r, g, b = (150, 150, 50) if darken else (200, 200, 80)
+            r, g, b = 200, 200, 80
             return QColor(r, g, b, alpha_bg), QColor(r, g, b, alpha_bar)
         else:
-            r, g, b = (190, 100, 50) if darken else (255, 140, 80)
+            r, g, b = 255, 140, 80
             return QColor(r, g, b, alpha_bg), QColor(r, g, b, alpha_bar)
 
     def _invalidate_wave_cache(self):
@@ -667,7 +664,7 @@ class _WaveformWidget(QWidget):
         bar_colors = []
         for i in range(n):
             frac = i / n
-            default_color = QColor(140, 140, 140, 100) if self._readonly else QColor(200, 200, 200, 130)
+            default_color = QColor(200, 200, 200, 130)
             color = default_color
             for si, (start, end) in enumerate(self._sections):
                 if start <= frac < end:
