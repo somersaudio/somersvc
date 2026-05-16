@@ -5027,9 +5027,10 @@ class _CreateModelPanel(QWidget):
 class _ConvertQueueRow(QWidget):
     """One file row in the batch-convert queue list.
 
-    Carries a status the runner drives later (queued → converting →
-    done/failed); for now every row is just 'queued'. The status maps
-    to a coloured dot + filename so completion reads at a glance.
+    Carries a status the batch runner drives (queued → converting →
+    done/failed). The status maps to a coloured dot + filename so
+    completion reads at a glance; the converting row also gets a
+    faint highlight and an animated dot.
     """
     remove_requested = pyqtSignal(str)  # emits this row's path
 
@@ -5040,11 +5041,16 @@ class _ConvertQueueRow(QWidget):
         "done":       ("●", "#4ade80", "#4ade80"),
         "failed":     ("●", "#ef4444", "#ef4444"),
     }
+    # Rotating frames for the converting-row dot animation.
+    _SPIN = ["◐", "◓", "◑", "◒"]
 
     def __init__(self, path: str, parent=None):
         super().__init__(parent)
         self.path = path
         self.status = "queued"
+        self._spin_idx = 0
+        # Required for the converting-row highlight to actually paint.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(10, 5, 8, 5)
@@ -5078,6 +5084,9 @@ class _ConvertQueueRow(QWidget):
         glyph, text_color, dot_color = self._STATUS.get(
             status, self._STATUS["queued"]
         )
+        if status == "converting":
+            self._spin_idx = 0
+            glyph = self._SPIN[0]
         self._dot.setText(glyph)
         self._dot.setStyleSheet(
             f"color: {dot_color}; font-size: 11px; background: transparent;"
@@ -5087,13 +5096,29 @@ class _ConvertQueueRow(QWidget):
             f"color: {text_color}; font-size: 12px; font-weight: {weight};"
             " background: transparent;"
         )
+        # Faint highlight marks the file currently being converted.
+        if status == "converting":
+            self.setStyleSheet(
+                "_ConvertQueueRow { background-color: rgba(94,140,255,20);"
+                " border-radius: 6px; }"
+            )
+        else:
+            self.setStyleSheet("")
         # Removing a file only makes sense while it's still waiting.
         self._btn_remove.setVisible(status == "queued")
 
+    def tick_spinner(self):
+        """Advance the converting-row dot by one animation frame."""
+        if self.status != "converting":
+            return
+        self._spin_idx = (self._spin_idx + 1) % len(self._SPIN)
+        self._dot.setText(self._SPIN[self._spin_idx])
+
 
 class _ConvertQueueList(QWidget):
-    """Scrollable list of files queued for batch conversion. Shown in
-    place of the waveform editor when 2+ files are loaded."""
+    """Scrollable list of files queued for batch conversion, with a
+    live N-of-M header. Shown in place of the waveform editor when
+    2+ files are loaded."""
     remove_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -5102,6 +5127,14 @@ class _ConvertQueueList(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+
+        self._header = QLabel("")
+        self._header.setStyleSheet(
+            "color: #999; font-size: 11px; font-weight: 600;"
+            " background: transparent; padding: 0 4px;"
+        )
+        outer.addWidget(self._header)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -5122,6 +5155,23 @@ class _ConvertQueueList(QWidget):
         self._list_layout.addStretch()  # keep rows top-aligned
         self._scroll.setWidget(self._inner)
         outer.addWidget(self._scroll)
+
+        # Drives the converting-row dot animation while a file runs.
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(130)
+        self._spin_timer.timeout.connect(self._tick_spinner)
+
+    def set_header(self, text: str):
+        """Set the line above the list (accepts rich text for colour)."""
+        self._header.setText(text)
+
+    def _tick_spinner(self):
+        active = [r for r in self._rows.values() if r.status == "converting"]
+        if not active:
+            self._spin_timer.stop()
+            return
+        for r in active:
+            r.tick_spinner()
 
     def set_files(self, paths: list):
         """Rebuild the list to match `paths`, carrying over the status
@@ -5151,9 +5201,13 @@ class _ConvertQueueList(QWidget):
         row = self._rows.get(path)
         if row is not None:
             row.set_status(status)
+        if status == "converting" and not self._spin_timer.isActive():
+            self._spin_timer.start()
 
     def clear(self):
+        self._spin_timer.stop()
         self.set_files([])
+        self._header.setText("")
 
 
 class SimplePage(QWidget):
@@ -6743,6 +6797,10 @@ class SimplePage(QWidget):
             return
         path = self._batch_files[self._batch_index]
         self._convert_queue.set_status(path, "converting")
+        self._convert_queue.set_header(
+            f"Converting {self._batch_index + 1} of "
+            f"{len(self._batch_files)} — {os.path.basename(path)}"
+        )
         self._log.append_line(
             f"[{self._batch_index + 1}/{len(self._batch_files)}] "
             f"{os.path.basename(path)}"
@@ -6827,25 +6885,24 @@ class SimplePage(QWidget):
         done = self._batch_done
         failed = len(self._batch_failed)
         total = len(self._batch_files)
+        # The header doubles as the end-of-batch summary.
+        if failed:
+            self._convert_queue.set_header(
+                f'<span style="color:#4ade80;">✓ {done} of {total} '
+                f'converted</span>'
+                f'<span style="color:#ef4444;">　·　{failed} failed</span>'
+            )
+        else:
+            self._convert_queue.set_header(
+                f'<span style="color:#4ade80;">✓ All {done} files '
+                f'converted</span>'
+            )
         summary = f"Batch complete — {done}/{total} converted"
         if failed:
             summary += f", {failed} failed"
         self._log.append_line(summary)
         self._log.setVisible(True)
         QTimer.singleShot(50, self._position_bottom_panel)
-        if failed:
-            QMessageBox.information(
-                self, "Batch Complete",
-                f"{done} of {total} files converted.\n\n"
-                f"{failed} failed ({', '.join(self._batch_failed)}) — "
-                "marked red in the list.",
-            )
-        else:
-            QMessageBox.information(
-                self, "Batch Complete",
-                f"All {done} files converted — they're in your "
-                "output folder.",
-            )
 
     def _cancel_batch(self):
         """Stop a running batch after a second Convert click."""
@@ -6861,6 +6918,10 @@ class SimplePage(QWidget):
                 self._convert_queue.set_status(p, "queued")
         self._convert_ring.set_converting(False)
         self._convert_ring.set_progress(0.0)
+        self._convert_queue.set_header(
+            f'<span style="color:#f59e0b;">Cancelled — {self._batch_done} '
+            f'of {len(self._batch_files)} converted</span>'
+        )
         self._log.append_line(
             f"Batch cancelled — {self._batch_done} of "
             f"{len(self._batch_files)} converted."
@@ -7187,6 +7248,7 @@ class SimplePage(QWidget):
             return
         # Batch mode — the queue list stands in for the waveform editor.
         self._convert_queue.set_files(self._source_paths)
+        self._convert_queue.set_header(f"{n} files queued")
         self._convert_queue.setVisible(True)
         self._btn_clear_source.setVisible(True)
         self._waveform.setVisible(False)
