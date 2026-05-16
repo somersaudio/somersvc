@@ -7119,6 +7119,54 @@ class SimplePage(QWidget):
         if self._hf_loaded:
             self._show_dropdown(text)
 
+    def _hf_warning_dismissed(self) -> bool:
+        """Has the user opted out of the community-model download warning?"""
+        from services.job_store import load_config
+        return bool(load_config().get("hf_download_warning_dismissed", False))
+
+    def _set_hf_warning_dismissed(self):
+        from services.job_store import save_config
+        save_config({"hf_download_warning_dismissed": True})
+
+    def _rated_grade_for_artist(self, artist: str):
+        """The user's grade rating for a downloaded model of `artist`,
+        or None if it isn't downloaded or hasn't been rated."""
+        try:
+            import json
+            meta_path = os.path.join(MODELS_DIR, artist, "metadata.json")
+            if os.path.exists(meta_path):
+                with open(meta_path) as f:
+                    return json.load(f).get("user_grade_override") or None
+        except Exception:
+            pass
+        return None
+
+    def _badge_icon(self, base_px, grade: str):
+        """28px dropdown icon: the artist thumbnail (if any) with the
+        grade badge in the bottom-right corner — or just the badge when
+        there's no thumbnail."""
+        badge = QPixmap(
+            os.path.join(APP_DIR, "assets", "grade_badges", f"{grade}.png")
+        )
+        if badge.isNull():
+            return base_px
+        canvas = QPixmap(28, 28)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        if base_px is not None and not base_px.isNull():
+            painter.drawPixmap(0, 0, base_px)
+            bsize = 15
+        else:
+            bsize = 22
+        badge = badge.scaled(
+            bsize, bsize, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        painter.drawPixmap(28 - badge.width(), 28 - badge.height(), badge)
+        painter.end()
+        return canvas
+
     def _show_dropdown(self, ft="", show_all=False):
         ft = ft.lower()
         self._dropdown.clear()
@@ -7134,12 +7182,20 @@ class SimplePage(QWidget):
             item = QListWidgetItem(m["artist"])
             item.setData(Qt.ItemDataRole.UserRole, m)
 
+            icon_px = None
             thumb = os.path.join(self._image_cache_dir, f"{m['artist']}.jpg")
             if os.path.exists(thumb):
                 px = QPixmap(thumb)
                 if not px.isNull():
                     from ui.widgets.voice_card import VoiceCard
-                    item.setIcon(QIcon(VoiceCard._make_circular(px, 28)))
+                    icon_px = VoiceCard._make_circular(px, 28)
+            # If the user has downloaded and rated this model, ride its
+            # grade badge on the row icon, next to the artist name.
+            grade = self._rated_grade_for_artist(m["artist"])
+            if grade:
+                icon_px = self._badge_icon(icon_px, grade)
+            if icon_px is not None:
+                item.setIcon(QIcon(icon_px))
 
             self._dropdown.addItem(item)
             shown += 1
@@ -7266,6 +7322,34 @@ class SimplePage(QWidget):
         self._dropdown.setVisible(False)
         self._search.clear()
 
+        # Community models are outside uploads — warn before downloading,
+        # once, unless the user has opted out.
+        if not self._hf_warning_dismissed():
+            from PyQt6.QtWidgets import QCheckBox
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Community model")
+            box.setText(f"'{artist}' is a community model from Hugging Face.")
+            box.setInformativeText(
+                "These are uploaded by outside users — not tested or "
+                "verified by SomerSVC, and quality varies. After it "
+                "downloads, you can rate it by clicking its grade in your "
+                "models; your rating then shows next to the artist here "
+                "in the download list."
+            )
+            dont_ask = QCheckBox("Don't show this again")
+            box.setCheckBox(dont_ask)
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Ok
+            )
+            box.button(QMessageBox.StandardButton.Ok).setText("Download")
+            box.setDefaultButton(QMessageBox.StandardButton.Ok)
+            if box.exec() != QMessageBox.StandardButton.Ok:
+                return
+            if dont_ask.isChecked():
+                self._set_hf_warning_dismissed()
+
         dest = os.path.join(MODELS_DIR, artist)
         if os.path.exists(dest):
             reply = QMessageBox.question(
@@ -7316,7 +7400,12 @@ class SimplePage(QWidget):
             self._hide_spinner()
             self._search.setPlaceholderText("Search artists on HuggingFace...")
             self._refresh_models()
-            QMessageBox.information(self, "Downloaded", f"'{artist}' ready!")
+            QMessageBox.information(
+                self, "Downloaded",
+                f"'{artist}' is ready.\n\nIt's an untested community "
+                "model — once you've tried it, rate it by clicking its "
+                "grade in your models.",
+            )
         except Exception as e:
             self._hide_spinner()
             self._search.setPlaceholderText("Search artists on HuggingFace...")
