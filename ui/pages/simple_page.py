@@ -6999,15 +6999,36 @@ class SimplePage(QWidget):
             config_path = ""
         return model_dir, mt, model_path, config_path
 
+    def _is_converted(self, path: str) -> bool:
+        """True if this file's queue row is already done (green)."""
+        row = self._convert_queue.row(path)
+        return row is not None and row.status == "done"
+
     def _start_batch(self):
-        """Kick off a sequential conversion of every queued file. One
+        """Kick off a sequential conversion of the queued files. One
         model for the whole batch; Range-Match (if on) computes each
-        file's pitch shift individually inside its InferenceWorker."""
+        file's pitch shift individually inside its InferenceWorker.
+
+        Files already converted (green) are skipped — they never
+        re-convert; only not-yet-done files run."""
         resolved = self._resolve_selected_model()
         if resolved is None:
             return
         (self._batch_model_dir, self._batch_mt,
          self._batch_model_path, self._batch_config_path) = resolved
+
+        # Convert only files not already done — a green/converted row is
+        # never re-run. Queued and failed files are (re)included.
+        self._batch_files = [
+            p for p in self._source_paths if not self._is_converted(p)
+        ]
+        if not self._batch_files:
+            QMessageBox.information(
+                self, "Already Converted",
+                "Every queued file is already converted. Drop in new "
+                "files to convert more.",
+            )
+            return
 
         # Each batch lands in its own OUTPUT_DIR/<artist>_Batch_<N>
         # folder so runs stay organised and never overwrite each other.
@@ -7015,14 +7036,14 @@ class SimplePage(QWidget):
                   if self._batch_model_dir else "converted")
         self._batch_output_dir = self._make_batch_folder(artist)
 
-        self._batch_files = list(self._source_paths)
         self._batch_index = 0
         self._batch_done = 0
         self._batch_failed = []
         self._batch_results = {}
         self._batch_running = True
 
-        # Fresh run — every row back to queued.
+        # Reset only the files about to convert; converted (green) rows
+        # are left exactly as they are.
         for p in self._batch_files:
             self._convert_queue.set_status(p, "queued")
 
@@ -7172,9 +7193,16 @@ class SimplePage(QWidget):
         self._hide_spinner()
         self._convert_ring.set_progress(1.0)
         QTimer.singleShot(500, lambda: self._convert_ring.set_converting(False))
-        done = self._batch_done
-        failed = len(self._batch_failed)
-        total = len(self._batch_files)
+        # Summarise the whole queue — files done in earlier runs were
+        # intentionally skipped this run but still count toward the total.
+        def _count(status):
+            return sum(
+                1 for p in self._source_paths
+                if (r := self._convert_queue.row(p)) and r.status == status
+            )
+        done = _count("done")
+        failed = _count("failed")
+        total = len(self._source_paths)
         # The header doubles as the end-of-batch summary.
         if failed:
             self._convert_queue.set_header(
