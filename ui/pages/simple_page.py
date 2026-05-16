@@ -5162,6 +5162,12 @@ class SimplePage(QWidget):
         self._worker = None
         self._original_source = ""
         self._source_paths = []  # batch convert queue (raw file paths)
+        self._batch_running = False
+        self._batch_files = []
+        self._batch_index = 0
+        self._batch_done = 0
+        self._batch_failed = []
+        self._batch_results = {}  # source path -> converted output path
         self._section_cache = {}
         self._selected_model_idx = -1
         self._optimized_for_model = -1  # model idx the waveform was last optimized for
@@ -6469,7 +6475,10 @@ class SimplePage(QWidget):
             self._toggle_realtime()
             return
 
-        # If already converting, cancel
+        # Already running? A second click cancels — batch or single.
+        if self._batch_running:
+            self._cancel_batch()
+            return
         if self._worker and self._worker.isRunning():
             self._worker.terminate()
             self._worker.wait(1000)
@@ -6480,43 +6489,19 @@ class SimplePage(QWidget):
             self._log.append_line("Cancelled.")
             return
 
-        # Batch mode — the sequential runner lands in the next step.
+        # Batch mode — convert the whole queue, one file at a time.
         if len(self._source_paths) >= 2:
-            QMessageBox.information(
-                self, "Batch Convert",
-                f"{len(self._source_paths)} files are queued. Running the "
-                "whole batch is being wired up next — for now, queue a "
-                "single file to convert.",
-            )
+            self._start_batch()
             return
 
-        if self._cmb_model.count() == 0 or not self._cmb_model.currentData():
-            QMessageBox.warning(self, "No Model", "Select a model first.")
-            return
         if not self._source_path or not os.path.exists(self._source_path):
             QMessageBox.warning(self, "No Audio", "Select an audio file first.")
             return
 
-        model_dir = self._cmb_model.currentData()
-        mt = detect_model_type(model_dir)
-
-        if mt == "svc":
-            g_files = sorted(
-                [f for f in os.listdir(model_dir) if f.startswith("G_") and f.endswith(".pth")],
-                key=lambda f: int(f.replace("G_", "").replace(".pth", "")) if f.replace("G_", "").replace(".pth", "").isdigit() else 0,
-            )
-            if not g_files:
-                QMessageBox.warning(self, "No Model", "No checkpoint found.")
-                return
-            model_path = os.path.join(model_dir, g_files[-1])
-            config_path = os.path.join(model_dir, "config.json")
-        else:
-            rvc_files = _get_rvc_pth_files(os.listdir(model_dir))
-            if not rvc_files:
-                QMessageBox.warning(self, "No Model", "No RVC model found.")
-                return
-            model_path = os.path.join(model_dir, rvc_files[0])
-            config_path = ""
+        resolved = self._resolve_selected_model()
+        if resolved is None:
+            return
+        model_dir, mt, model_path, config_path = resolved
 
         # Calculate transpose (only when matching artist's range)
         transpose = 0
@@ -6687,6 +6672,199 @@ class SimplePage(QWidget):
         self._convert_ring.set_converting(False)
         self._log.append_line(f"ERROR: {error}")
         QMessageBox.critical(self, "Error", f"Conversion failed:\n{error}")
+
+    # ===== BATCH CONVERT =====
+
+    def _resolve_selected_model(self):
+        """Resolve the carousel's current model to
+        (model_dir, model_type, model_path, config_path). Shows a
+        warning and returns None if nothing usable is selected."""
+        if self._cmb_model.count() == 0 or not self._cmb_model.currentData():
+            QMessageBox.warning(self, "No Model", "Select a model first.")
+            return None
+        model_dir = self._cmb_model.currentData()
+        mt = detect_model_type(model_dir)
+        if mt == "svc":
+            g_files = sorted(
+                [f for f in os.listdir(model_dir) if f.startswith("G_") and f.endswith(".pth")],
+                key=lambda f: int(f.replace("G_", "").replace(".pth", "")) if f.replace("G_", "").replace(".pth", "").isdigit() else 0,
+            )
+            if not g_files:
+                QMessageBox.warning(self, "No Model", "No checkpoint found.")
+                return None
+            model_path = os.path.join(model_dir, g_files[-1])
+            config_path = os.path.join(model_dir, "config.json")
+        else:
+            rvc_files = _get_rvc_pth_files(os.listdir(model_dir))
+            if not rvc_files:
+                QMessageBox.warning(self, "No Model", "No RVC model found.")
+                return None
+            model_path = os.path.join(model_dir, rvc_files[0])
+            config_path = ""
+        return model_dir, mt, model_path, config_path
+
+    def _start_batch(self):
+        """Kick off a sequential conversion of every queued file. One
+        model for the whole batch; Range-Match (if on) computes each
+        file's pitch shift individually inside its InferenceWorker."""
+        resolved = self._resolve_selected_model()
+        if resolved is None:
+            return
+        (self._batch_model_dir, self._batch_mt,
+         self._batch_model_path, self._batch_config_path) = resolved
+
+        self._batch_files = list(self._source_paths)
+        self._batch_index = 0
+        self._batch_done = 0
+        self._batch_failed = []
+        self._batch_results = {}
+        self._batch_running = True
+
+        # Fresh run — every row back to queued.
+        for p in self._batch_files:
+            self._convert_queue.set_status(p, "queued")
+
+        self._convert_ring.set_update_mode(False)
+        self._convert_ring.set_converting(True)
+        self._convert_ring.set_progress(0.02)
+        self._log.clear_log()
+        self._log.append_line(
+            f"Batch: converting {len(self._batch_files)} files..."
+        )
+        QTimer.singleShot(50, self._position_bottom_panel)
+        self._batch_next()
+
+    def _batch_next(self):
+        """Advance to the next queued file, or finish the batch."""
+        if not self._batch_running:
+            return
+        if self._batch_index >= len(self._batch_files):
+            self._batch_finish()
+            return
+        path = self._batch_files[self._batch_index]
+        self._convert_queue.set_status(path, "converting")
+        self._log.append_line(
+            f"[{self._batch_index + 1}/{len(self._batch_files)}] "
+            f"{os.path.basename(path)}"
+        )
+        # Normalize this file, then convert it.
+        self._batch_norm = _NormalizeWorker(path)
+        self._batch_norm.finished.connect(self._batch_convert_file)
+        self._batch_norm.start()
+
+    def _batch_convert_file(self, norm_path):
+        """Run one InferenceWorker for the current batch file."""
+        if not self._batch_running:
+            return
+        self._worker = InferenceWorker(
+            source_wav=norm_path,
+            model_path=self._batch_model_path,
+            config_path=self._batch_config_path,
+            output_dir=OUTPUT_DIR,
+            transpose=0,
+            f0_method="crepe",
+            auto_predict_f0=False,
+            noise_scale=0.1,
+            db_thresh=-35,
+            pad_seconds=1.0,
+            chunk_seconds=30.0,
+            separate_vocals=False,
+            model_type=self._batch_mt,
+            model_dir=self._batch_model_dir,
+            smart_transpose=self._btn_range_match.isChecked() and self._model_center_hz > 0,
+            model_center_hz=self._model_center_hz,
+            max_sections=20,
+        )
+        self._worker.log_line.connect(self._on_batch_log)
+        self._worker.finished_ok.connect(self._on_batch_file_done)
+        self._worker.error.connect(self._on_batch_file_error)
+        self._worker.start()
+
+    def _on_batch_log(self, line):
+        self._log.append_line(line)
+        # Overall ring progress = whole files done + this file's fraction.
+        total = max(1, len(self._batch_files))
+        frac = 0.0
+        import re
+        m = re.search(r"section (\d+)/(\d+)", line)
+        if m:
+            frac = int(m.group(1)) / max(1, int(m.group(2)))
+        elif "Output saved" in line:
+            frac = 1.0
+        self._convert_ring.set_progress(
+            min(0.99, (self._batch_index + frac) / total)
+        )
+
+    def _on_batch_file_done(self, output_path):
+        if not self._batch_running:
+            return
+        path = self._batch_files[self._batch_index]
+        self._convert_queue.set_status(path, "done")
+        self._batch_results[path] = output_path
+        self._batch_done += 1
+        self._log.append_line(f"  ✓ {os.path.basename(output_path)}")
+        self._worker = None
+        self._batch_index += 1
+        self._batch_next()
+
+    def _on_batch_file_error(self, error):
+        if not self._batch_running:
+            return
+        path = self._batch_files[self._batch_index]
+        self._convert_queue.set_status(path, "failed")
+        self._batch_failed.append(os.path.basename(path))
+        self._log.append_line(f"  ✗ {os.path.basename(path)}: {error}")
+        self._worker = None
+        self._batch_index += 1
+        # Per the design: keep going, the failed file just stays red.
+        self._batch_next()
+
+    def _batch_finish(self):
+        self._batch_running = False
+        self._worker = None
+        self._convert_ring.set_progress(1.0)
+        QTimer.singleShot(500, lambda: self._convert_ring.set_converting(False))
+        done = self._batch_done
+        failed = len(self._batch_failed)
+        total = len(self._batch_files)
+        summary = f"Batch complete — {done}/{total} converted"
+        if failed:
+            summary += f", {failed} failed"
+        self._log.append_line(summary)
+        self._log.setVisible(True)
+        QTimer.singleShot(50, self._position_bottom_panel)
+        if failed:
+            QMessageBox.information(
+                self, "Batch Complete",
+                f"{done} of {total} files converted.\n\n"
+                f"{failed} failed ({', '.join(self._batch_failed)}) — "
+                "marked red in the list.",
+            )
+        else:
+            QMessageBox.information(
+                self, "Batch Complete",
+                f"All {done} files converted — they're in your "
+                "output folder.",
+            )
+
+    def _cancel_batch(self):
+        """Stop a running batch after a second Convert click."""
+        self._batch_running = False
+        if self._worker and self._worker.isRunning():
+            self._worker.terminate()
+            self._worker.wait(1000)
+        self._worker = None
+        # Any file still mid-flight reverts to queued.
+        for p in self._batch_files:
+            row = self._convert_queue.row(p)
+            if row is not None and row.status == "converting":
+                self._convert_queue.set_status(p, "queued")
+        self._convert_ring.set_converting(False)
+        self._convert_ring.set_progress(0.0)
+        self._log.append_line(
+            f"Batch cancelled — {self._batch_done} of "
+            f"{len(self._batch_files)} converted."
+        )
 
     # ===== SEARCH / BROWSE =====
 
