@@ -65,6 +65,8 @@ class SettingsPage(QWidget):
         # Wired after _load_saved() so populating the fields doesn't
         # itself trigger a save.
         self._wire_autosave()
+        # Reflect the loaded Train-locally state in the GPU section.
+        self._sync_gpu_section_visibility()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -169,23 +171,35 @@ class SettingsPage(QWidget):
         spotify_row.addWidget(self.txt_spotify_secret, 1)
         layout.addLayout(spotify_row)
 
-        # ── Cloud GPU tier ──────────────────────────────────────────────
+        # ── Train locally ──────────────────────────────────────────────
+        # Novelty option for users with very fast Macs (M5+) or NVIDIA
+        # GPUs. Off by default; pod training is the recommended path.
+        # Placed above the Cloud GPU section because turning it on hides
+        # that section — a local run ignores the cloud tier entirely.
         layout.addSpacing(20)
+        self.chk_train_local = QCheckBox("Train locally")
+        self.chk_train_local.setToolTip(
+            "Run the entire training pipeline on this computer instead of "
+            "renting a cloud GPU. Only practical on very fast Macs (M5+) "
+            "or machines with an NVIDIA GPU. Most users should leave this off."
+        )
+        self.chk_train_local.setStyleSheet(
+            "QCheckBox { color: #ddd; font-size: 12px; }"
+        )
+        layout.addWidget(self.chk_train_local)
+
+        # ── Cloud GPU tier ─────────────────────────────────────────────
+        # Wrapped in a container widget so the whole block can be shown
+        # or hidden as one unit when Train-locally is toggled. The 20px
+        # top margin lives inside the container so it collapses too.
+        self._gpu_section = QWidget()
+        gpu_layout = QVBoxLayout(self._gpu_section)
+        gpu_layout.setContentsMargins(0, 20, 0, 0)
+        gpu_layout.setSpacing(16)
+
         gpu_header = QLabel("Cloud GPU")
         gpu_header.setStyleSheet("color: #ddd; font-size: 13px; font-weight: 600;")
-        layout.addWidget(gpu_header)
-        gpu_hint = QLabel(
-            "Pick the GPU tier for training on RunPod. All four are "
-            "compatible with the trainer; cheaper tiers take longer "
-            "but cost less per run. GPU availability fluctuates "
-            "throughout the day — if your top pick is taken, the "
-            "trainer automatically tries the next-best option on the "
-            "same tier."
-        )
-        gpu_hint.setStyleSheet("color: rgba(255,255,255,90); font-size: 10px;")
-        gpu_hint.setWordWrap(True)
-        layout.addWidget(gpu_hint)
-        layout.addSpacing(4)
+        gpu_layout.addWidget(gpu_header)
 
         self._gpu_tier_group = QButtonGroup(self)
         self.rb_gpu_cheapest = QRadioButton(
@@ -209,32 +223,12 @@ class SettingsPage(QWidget):
                 "font-family: Menlo, monospace; padding: 2px 0; }"
             )
             self._gpu_tier_group.addButton(rb, i)
-            layout.addWidget(rb)
+            gpu_layout.addWidget(rb)
         self._gpu_tier_keys = {
             0: "cheapest", 1: "balanced", 2: "fast", 3: "fastest",
         }
 
-        # Train Locally — novelty option for users with very fast Macs (M5+)
-        # or NVIDIA GPUs. Off by default; pod training is the recommended
-        # path for everyone else.
-        layout.addSpacing(20)
-        self.chk_train_local = QCheckBox("Train locally")
-        self.chk_train_local.setToolTip(
-            "Run the entire training pipeline on this computer instead of "
-            "renting a cloud GPU. Only practical on very fast Macs (M5+) "
-            "or machines with an NVIDIA GPU. Most users should leave this off."
-        )
-        self.chk_train_local.setStyleSheet(
-            "QCheckBox { color: #ddd; font-size: 12px; }"
-        )
-        layout.addWidget(self.chk_train_local)
-        local_hint = QLabel(
-            "On a typical Mac, training that takes ~30 min on an A40 can "
-            "take many hours or days. Use only if you know what you're doing."
-        )
-        local_hint.setStyleSheet("color: rgba(255,255,255,90); font-size: 10px;")
-        local_hint.setWordWrap(True)
-        layout.addWidget(local_hint)
+        layout.addWidget(self._gpu_section)
 
         # No Save button — every field persists the moment it changes.
         layout.addSpacing(24)
@@ -310,6 +304,13 @@ class SettingsPage(QWidget):
         # setChecked), so loading the saved tier never triggers a save.
         self._gpu_tier_group.buttonClicked.connect(self._autosave)
         self.chk_train_local.toggled.connect(self._autosave)
+        # Toggling Train-locally also shows/hides the Cloud GPU section.
+        self.chk_train_local.toggled.connect(self._sync_gpu_section_visibility)
+
+    def _sync_gpu_section_visibility(self):
+        """Hide the Cloud GPU tier picker while Train-locally is on — a
+        local run never touches a cloud GPU, so the choice is moot."""
+        self._gpu_section.setVisible(not self.chk_train_local.isChecked())
 
     def _persist_config(self):
         """Write the current field state to disk. The field state is the
