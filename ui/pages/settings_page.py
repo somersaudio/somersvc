@@ -183,8 +183,10 @@ class SettingsPage(QWidget):
             "renting a cloud GPU. Only practical on very fast Macs (M5+) "
             "or machines with an NVIDIA GPU. Most users should leave this off."
         )
+        # Match the section-header style used by "Cloud GPU" and the
+        # bold field labels (RunPod API Key, SSH Private Key Path, ...).
         self.chk_train_local.setStyleSheet(
-            "QCheckBox { color: #ddd; font-size: 12px; }"
+            "QCheckBox { color: #ddd; font-size: 13px; font-weight: 600; }"
         )
         layout.addWidget(self.chk_train_local)
 
