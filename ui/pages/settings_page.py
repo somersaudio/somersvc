@@ -178,11 +178,6 @@ class SettingsPage(QWidget):
         # that section — a local run ignores the cloud tier entirely.
         layout.addSpacing(20)
         self.chk_train_local = QCheckBox("Train locally")
-        self.chk_train_local.setToolTip(
-            "Run the entire training pipeline on this computer instead of "
-            "renting a cloud GPU. Only practical on very fast Macs (M5+) "
-            "or machines with an NVIDIA GPU. Most users should leave this off."
-        )
         # Match the section-header style used by "Cloud GPU" and the
         # bold field labels (RunPod API Key, SSH Private Key Path, ...).
         self.chk_train_local.setStyleSheet(
