@@ -4,7 +4,7 @@ import os
 import webbrowser
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtGui import QGuiApplication, QPixmap
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from services.job_store import load_config, save_config
+from services.paths import APP_DIR
 from services.runpod_client import RunPodClient
 from services.ssh_setup import (
     SSH_KEY_PATH,
@@ -102,10 +103,28 @@ class SettingsPage(QWidget):
 
         layout.addSpacing(8)
 
-        # RunPod API Key
-        lbl_api = QLabel("RunPod API Key")
-        lbl_api.setStyleSheet("font-weight: bold;")
+        # RunPod API Key — the section header is the RunPod wordmark,
+        # with a subtle "api key" caption tucked under the input below.
+        lbl_api = QLabel()
+        _logo_pix = QPixmap(os.path.join(APP_DIR, "assets", "runpod_logo.png"))
+        if not _logo_pix.isNull():
+            # Render at 2x and tag dpr=2 so the white wordmark stays
+            # crisp on Retina displays at a ~22px logical height.
+            _scaled = _logo_pix.scaledToHeight(
+                44, Qt.TransformationMode.SmoothTransformation
+            )
+            _scaled.setDevicePixelRatio(2.0)
+            lbl_api.setPixmap(_scaled)
+        else:
+            lbl_api.setText("RunPod API Key")
+            lbl_api.setStyleSheet("font-weight: bold;")
         layout.addWidget(lbl_api)
+
+        # api_row + caption share a tight inner column so the caption
+        # hugs the input (4px) rather than the outer 16px section gap.
+        api_block = QVBoxLayout()
+        api_block.setContentsMargins(0, 0, 0, 0)
+        api_block.setSpacing(4)
 
         api_row = QHBoxLayout()
         self.txt_api_key = QLineEdit()
@@ -126,7 +145,14 @@ class SettingsPage(QWidget):
         self.btn_test = QPushButton("Test")
         self.btn_test.clicked.connect(self._test_connection)
         api_row.addWidget(self.btn_test)
-        layout.addLayout(api_row)
+        api_block.addLayout(api_row)
+
+        lbl_api_caption = QLabel("api key")
+        lbl_api_caption.setStyleSheet(
+            "color: rgba(255,255,255,90); font-size: 10px; padding-left: 2px;"
+        )
+        api_block.addWidget(lbl_api_caption)
+        layout.addLayout(api_block)
 
         # SSH Key Path
         layout.addSpacing(16)
