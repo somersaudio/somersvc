@@ -342,4 +342,13 @@ def _run_update_with_progress(parent_window, asset_url: str):
 
 
 if __name__ == "__main__":
+    # MUST be the first thing in __main__. so-vits-svc-fork's training
+    # and preprocessing spawn worker processes (pebble, joblib, PyTorch
+    # DataLoader). In the frozen .app those workers re-exec the bundle
+    # binary — and without freeze_support() each one falls through to
+    # the GUI branch and opens a window, then auto-resumes training and
+    # spawns more workers: a runaway fork-bomb of app windows.
+    # freeze_support() makes a spawned worker run its task and exit.
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
