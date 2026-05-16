@@ -6936,6 +6936,22 @@ class SimplePage(QWidget):
             min(0.99, (self._batch_index + frac) / total)
         )
 
+    def _release_worker(self):
+        """Drop the finished InferenceWorker safely.
+
+        finished_ok / error are emitted from inside the worker thread's
+        run(), so when the slot runs the QThread can still be tearing
+        down. Dropping the last Python reference then makes ~QThread
+        abort the process ("QThread: Destroyed while thread is still
+        running"). wait() blocks — releasing the GIL so the worker can
+        finish — until the thread has fully exited; only then is the
+        drop (when `w` falls out of scope) safe.
+        """
+        w = self._worker
+        self._worker = None
+        if w is not None:
+            w.wait(5000)
+
     def _on_batch_file_done(self, output_path):
         if not self._batch_running:
             return
@@ -6944,7 +6960,7 @@ class SimplePage(QWidget):
         self._convert_queue.set_status(path, "done", output_path)
         self._batch_done += 1
         self._log.append_line(f"  ✓ {os.path.basename(output_path)}")
-        self._worker = None
+        self._release_worker()
         self._batch_index += 1
         self._batch_next()
 
@@ -6955,7 +6971,7 @@ class SimplePage(QWidget):
         self._convert_queue.set_status(path, "failed")
         self._batch_failed.append(os.path.basename(path))
         self._log.append_line(f"  ✗ {os.path.basename(path)}: {error}")
-        self._worker = None
+        self._release_worker()
         self._batch_index += 1
         # Per the design: keep going, the failed file just stays red.
         self._batch_next()
