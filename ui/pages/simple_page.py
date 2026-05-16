@@ -7563,7 +7563,12 @@ class SimplePage(QWidget):
 
     def _open_output_folder(self, event=None):
         import subprocess
-        subprocess.Popen(["open", str(OUTPUT_DIR)])
+        # If a batch has run this session, jump straight to its
+        # <artist>_Batch_<N> folder; otherwise the output root.
+        target = OUTPUT_DIR
+        if self._batch_output_dir and os.path.isdir(self._batch_output_dir):
+            target = self._batch_output_dir
+        subprocess.Popen(["open", str(target)])
 
     def mousePressEvent(self, event):
         if self._dropdown.isVisible():
