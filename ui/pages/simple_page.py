@@ -5820,7 +5820,7 @@ class SimplePage(QWidget):
         bottom_layout.setSpacing(4)
 
         self._log = LogViewer()
-        self._log.setMaximumHeight(60)
+        self._log.setMaximumHeight(110)
         self._log.setVisible(False)
         bottom_layout.addWidget(self._log)
 
@@ -5862,7 +5862,11 @@ class SimplePage(QWidget):
     def _position_bottom_panel(self):
         self._bottom_panel.setFixedWidth(self.width())
         self._bottom_panel.adjustSize()
-        self._bottom_panel.move(0, self.height() - self._bottom_panel.height())
+        # Lift the panel 25px off the page bottom so the log doesn't
+        # overlap the settings button.
+        self._bottom_panel.move(
+            0, self.height() - self._bottom_panel.height() - 25
+        )
         self._bottom_panel.raise_()
 
     def _build_bg_cache(self):
