@@ -3,7 +3,10 @@
 import os
 
 from PyQt6.QtCore import Qt, QRectF, QSize, QThread, QTimer, pyqtSignal, QPoint
-from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import (
+    QBrush, QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath,
+    QPen, QPixmap,
+)
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -5056,6 +5059,78 @@ class _CreateModelPanel(QWidget):
         self.training_stopped.emit()
 
 
+class _OptimizeButton(QPushButton):
+    """The Optimize / Optimal button below the waveform. In the
+    optimized ('Optimal') state the word carries a slow left-to-right
+    shimmer; otherwise it renders as a normal stylesheet button."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._shimmer = False
+        self._phase = 0.0  # 0..1 sweep position
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)  # ~30 fps
+        self._timer.timeout.connect(self._advance)
+
+    def set_shimmer(self, on: bool):
+        if on == self._shimmer:
+            return
+        self._shimmer = on
+        if on and self.isVisible():
+            self._timer.start()
+        elif not on:
+            self._timer.stop()
+        self.update()
+
+    def _advance(self):
+        self._phase = (self._phase + 0.016) % 1.0
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._shimmer and not self._timer.isActive():
+            self._timer.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def paintEvent(self, event):
+        if not self._shimmer:
+            super().paintEvent(event)
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        # Border — matches the 'Optimal' stylesheet, green-tinted on hover.
+        hover = self.underMouse()
+        border = QColor(80, 200, 120, 110) if hover else QColor(255, 255, 255, 12)
+        p.setPen(QPen(border, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(
+            QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 10, 10
+        )
+        # Shimmering text: a bright band sweeps a dim base, entering from
+        # off-left and exiting off-right.
+        base = QColor(125, 125, 125)
+        shine = QColor(240, 240, 240)
+        band = 0.22
+        center = self._phase * (1.0 + 2 * band) - band
+        grad = QLinearGradient(0, 0, self.width(), 0)
+        for stop, col in (
+            (0.0, base),
+            (center - band, base),
+            (center, shine),
+            (center + band, base),
+            (1.0, base),
+        ):
+            grad.setColorAt(min(1.0, max(0.0, stop)), col)
+        p.setPen(QPen(QBrush(grad), 1))
+        p.setFont(self.font())
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+        p.end()
+
+
 class _ConvertQueueRow(QWidget):
     """One file row in the batch-convert queue list.
 
@@ -5651,7 +5726,7 @@ class SimplePage(QWidget):
 
 
         # Optimize button (appears below waveform when sections exist)
-        self._btn_optimize = QPushButton("Optimal")
+        self._btn_optimize = _OptimizeButton("Optimal")
         self._btn_optimize.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_optimize.setVisible(False)
         self._btn_optimize.setStyleSheet("""
@@ -6611,6 +6686,7 @@ class SimplePage(QWidget):
         QTimer.singleShot(2000, lambda: self._btn_optimize.setText("Optimal"))
 
     def _mark_optimize_dirty(self):
+        self._btn_optimize.set_shimmer(False)
         self._btn_optimize.setText("Optimize")
         self._btn_optimize.setStyleSheet("""
             QPushButton {
@@ -6629,6 +6705,7 @@ class SimplePage(QWidget):
 
     def _mark_optimize_clean(self):
         self._btn_optimize.setText("Optimal")
+        self._btn_optimize.set_shimmer(True)
         self._btn_optimize.setStyleSheet("""
             QPushButton {
                 background: transparent;
