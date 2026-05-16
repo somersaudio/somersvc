@@ -2681,26 +2681,29 @@ class _CreateModelPanel(QWidget):
         for w in getattr(self, "_selection_only_widgets", []):
             w.setVisible(has_selection)
 
-    def _selected_clip_rows(self) -> list:
-        """Indices of currently-selected rows in self._clips, sorted ascending."""
+    def _selected_clip_paths(self) -> list:
+        """Paths of the currently-selected clips — or the active row's
+        clip if nothing is multi-selected. Empty list if no selection.
+
+        Keeping clip actions path-based (not row-index based) lets the
+        list widget change underneath without touching them.
+        """
         rows = sorted({
             self._file_list.row(it)
             for it in self._file_list.selectedItems()
         })
-        return [r for r in rows if 0 <= r < len(self._clips)]
+        rows = [r for r in rows if 0 <= r < len(self._clips)]
+        if not rows:
+            cur = self._file_list.currentRow()
+            if 0 <= cur < len(self._clips):
+                rows = [cur]
+        return [self._clips[r] for r in rows]
 
     def _split_selected_clip(self):
         """Split each selected clip into ~7s chunks (clips ≤ 10s are skipped)."""
-        rows = self._selected_clip_rows()
-        if not rows:
-            row = self._file_list.currentRow()
-            if 0 <= row < len(self._clips):
-                rows = [row]
-        if not rows:
+        targets = self._selected_clip_paths()
+        if not targets:
             return
-
-        # Snapshot paths before mutating self._clips so indices stay sane
-        targets = [self._clips[r] for r in rows]
         split_count = 0
         skipped_short = 0
         for path in targets:
@@ -2737,14 +2740,9 @@ class _CreateModelPanel(QWidget):
 
     def _normalize_selected_clips(self):
         """Bring each selected clip's RMS to -12 dBFS, peak-safe (no clipping)."""
-        rows = self._selected_clip_rows()
-        if not rows:
-            row = self._file_list.currentRow()
-            if 0 <= row < len(self._clips):
-                rows = [row]
-        if not rows:
+        targets = self._selected_clip_paths()
+        if not targets:
             return
-        targets = [self._clips[r] for r in rows]
 
         TARGET_DBFS = -12.0
         target_amp = 10 ** (TARGET_DBFS / 20.0)  # ~0.2512
@@ -2837,17 +2835,12 @@ class _CreateModelPanel(QWidget):
 
     def _remove_selected_clip(self):
         """Remove every selected clip (or the active row if nothing's selected)."""
-        rows = self._selected_clip_rows()
-        if not rows:
-            row = self._file_list.currentRow()
-            if 0 <= row < len(self._clips):
-                rows = [row]
-        if not rows:
+        paths = self._selected_clip_paths()
+        if not paths:
             return
-        # Pop in reverse so earlier indices stay valid
-        for r in sorted(rows, reverse=True):
-            if 0 <= r < len(self._clips):
-                self._clips.pop(r)
+        for p in paths:
+            if p in self._clips:
+                self._clips.remove(p)
         self._refresh_file_list()
 
     def _ask_export_options(self, name: str, dataset_files: list, dataset_dur: float):
@@ -4452,15 +4445,9 @@ class _CreateModelPanel(QWidget):
 
     def _isolate_vocals(self):
         # Operate on whatever the user has selected in the file list.
-        rows = self._selected_clip_rows()
-        if not rows:
-            row = self._file_list.currentRow()
-            if 0 <= row < len(self._clips):
-                rows = [row]
-        if not rows:
+        paths = self._selected_clip_paths()
+        if not paths:
             return
-
-        paths = [self._clips[r] for r in rows]
 
         # Skip files that are already isolated outputs — there's nothing
         # useful to extract from them.
