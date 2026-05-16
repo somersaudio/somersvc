@@ -6900,6 +6900,7 @@ class SimplePage(QWidget):
         self._convert_ring.set_update_mode(False)
         self._convert_ring.set_converting(True)
         self._convert_ring.set_progress(0.02)
+        self._show_spinner("converting")
         self._log.clear_log()
         self._log.append_line(
             f"Batch: converting {len(self._batch_files)} files "
@@ -7039,6 +7040,7 @@ class SimplePage(QWidget):
     def _batch_finish(self):
         self._batch_running = False
         self._worker = None
+        self._hide_spinner()
         self._convert_ring.set_progress(1.0)
         QTimer.singleShot(500, lambda: self._convert_ring.set_converting(False))
         done = self._batch_done
@@ -7070,6 +7072,7 @@ class SimplePage(QWidget):
             self._worker.terminate()
             self._worker.wait(1000)
         self._worker = None
+        self._hide_spinner()
         # Any file still mid-flight reverts to queued.
         for p in self._batch_files:
             row = self._convert_queue.row(p)
