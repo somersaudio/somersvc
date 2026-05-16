@@ -281,12 +281,13 @@ class LocalTrainingWorker(QThread):
             )
 
     def _run_train(self, root: Path):
-        # so-vits-svc-fork uses np.fromstring(..., sep="") (binary mode)
-        # which NumPy 2.x removed. Patch the installed file once so
+        # svc-fork's validation-step plot uses np.fromstring(..., sep="")
+        # (removed in NumPy 2.x) and FigureCanvasAgg.tostring_rgb()
+        # (removed in matplotlib 3.10). Patch the installed file once so
         # validation doesn't crash. No-op if already patched or the file
-        # isn't writable (bundled .app — main.py handles the same shim
+        # isn't writable (bundled .app — main.py handles the same shims
         # at runtime via the --svc-mode dispatcher).
-        self._patch_svc_fork_for_numpy2()
+        self._patch_svc_fork_plot_compat()
         cmd = _svc_argv() + [
             "train", "--model-path", str(root / "logs" / "44k"),
         ]
@@ -316,10 +317,20 @@ class LocalTrainingWorker(QThread):
         m = re.match(r'[GD]_(\d+)\.pth', name)
         return int(m.group(1)) if m else None
 
-    def _patch_svc_fork_for_numpy2(self) -> None:
-        """One-shot textual patch of the installed so-vits-svc-fork copy:
-        np.fromstring(..., sep="") → np.frombuffer(..., dtype=np.uint8).
-        Idempotent. Best-effort — silent if the file isn't writable.
+    def _patch_svc_fork_plot_compat(self) -> None:
+        """One-shot textual patch of the installed so-vits-svc-fork copy
+        so the validation-step spectrogram plot survives modern deps.
+        Two breakages live on the same line of plot_spectrogram_to_numpy:
+
+          - NumPy 2.x removed binary-mode np.fromstring(..., sep="").
+          - matplotlib 3.10 removed FigureCanvasAgg.tostring_rgb().
+
+        We swap the whole call for buffer_rgba(), which exists across
+        every relevant matplotlib version and yields an (H, W, 4) array;
+        dropping the alpha channel gives the flat RGB the next line
+        reshapes. Idempotent. Best-effort — silent if the file isn't
+        writable (e.g. the read-only site-packages inside a bundled
+        .app, where main.py's --svc-mode shims cover the same ground).
         """
         try:
             from so_vits_svc_fork import utils as _svc_utils
@@ -330,24 +341,29 @@ class LocalTrainingWorker(QThread):
             text = utils_path.read_text()
         except Exception:
             return
-        # Already patched?
-        if "np.frombuffer(fig.canvas.tostring_argb()" in text:
-            return
-        old = 'np.fromstring(fig.canvas.tostring_argb(), dtype=np.uint8, sep="")'
-        new_call = 'np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)'
-        if old not in text:
-            return
+        new_call = 'np.asarray(fig.canvas.buffer_rgba())[..., :3].reshape(-1)'
+        if new_call in text:
+            return  # already patched
+        # svc-fork 4.1.x uses tostring_rgb; tolerate the argb spelling too.
+        patched = text
+        for old in (
+            'np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")',
+            'np.fromstring(fig.canvas.tostring_argb(), dtype=np.uint8, sep="")',
+        ):
+            patched = patched.replace(old, new_call)
+        if patched == text:
+            return  # nothing matched — leave the file untouched
         try:
-            utils_path.write_text(text.replace(old, new_call))
+            utils_path.write_text(patched)
             self._log(
                 "Patched so-vits-svc-fork plot_spectrogram_to_numpy for "
-                "NumPy 2.x compatibility."
+                "NumPy 2.x / matplotlib 3.10 compatibility."
             )
         except Exception as e:
             self._log(
-                f"Could not patch so-vits-svc-fork on disk ({e}). "
-                "If training crashes on validation, downgrade numpy<2 in "
-                "your venv."
+                f"Could not patch so-vits-svc-fork on disk ({e}). If "
+                "training crashes on the validation step, pin numpy<2 "
+                "and matplotlib<3.9 in your environment."
             )
 
     def _save_metadata(self, model_dir: Path, checkpoint: str):

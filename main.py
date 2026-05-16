@@ -154,6 +154,20 @@ def main():
         except Exception:
             pass
         from so_vits_svc_fork.__main__ import cli
+        # matplotlib 3.10 removed FigureCanvasAgg.tostring_rgb(), which
+        # svc-fork's plot_spectrogram_to_numpy still calls on the
+        # validation step — crashes local training at epoch 0. Re-add it
+        # as a thin buffer_rgba() shim. matplotlib is already imported by
+        # so_vits_svc_fork above, so this costs nothing. Idempotent.
+        try:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg as _FCA
+            if not hasattr(_FCA, "tostring_rgb"):
+                import numpy as _np_mpl
+                def _tostring_rgb_shim(self):
+                    return _np_mpl.asarray(self.buffer_rgba())[..., :3].tobytes()
+                _FCA.tostring_rgb = _tostring_rgb_shim
+        except Exception:
+            pass
         # The Click CLI parses sys.argv[1:], so reshape to look like `svc <subcmd> ...`
         sys.argv = ["svc"] + sys.argv[2:]
         cli()

@@ -4616,7 +4616,13 @@ class _CreateModelPanel(QWidget):
             api_key = config.get("runpod_api_key", "") or os.environ.get("SOMERSVC_RUNPOD_KEY", "")
             ssh_key = os.path.expanduser(config.get("ssh_key_path", "~/.ssh/id_rsa"))
 
-            if not api_key:
+            # Train locally? Settings flag — pod is the default otherwise.
+            # A local run executes entirely on this machine and never
+            # contacts RunPod, so the API-key requirement is gated to the
+            # cloud path only.
+            train_locally = bool(config.get("train_locally", False))
+
+            if not train_locally and not api_key:
                 QMessageBox.warning(self, "No API Key", "Set your RunPod API key in Settings first.")
                 self._btn_train.setEnabled(True)
                 self._btn_continue_train.setEnabled(True)
@@ -4627,11 +4633,9 @@ class _CreateModelPanel(QWidget):
             job = create_job(name)
             job_id = job["job_id"]
 
-            # Train locally? Settings flag — pod is the default for everyone
-            # else. The local worker mirrors the orchestrator's surface so
-            # the rest of the UI plumbing (Stop, log parser, progress, etc.)
+            # The local worker mirrors the orchestrator's surface so the
+            # rest of the UI plumbing (Stop, log parser, progress, etc.)
             # works without changes.
-            train_locally = bool(config.get("train_locally", False))
             if train_locally:
                 from workers.local_training_worker import LocalTrainingWorker
                 self._log.append_line(
