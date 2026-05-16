@@ -1441,6 +1441,34 @@ class _ClipBadgeDelegate(QStyledItemDelegate):
             painter.restore()
 
 
+class _HFArtistDelegate(QStyledItemDelegate):
+    """Renders HF dropdown rows normally, then overlays the user's
+    grade rating as a subtle cyan letter at the right of the row."""
+
+    GRADE_ROLE = Qt.ItemDataRole.UserRole + 1
+    _GRADE_COLOR = QColor(108, 197, 212, 165)  # subtle cyan
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        grade = index.data(self.GRADE_ROLE)
+        if not grade:
+            return
+        painter.save()
+        try:
+            font = QFont(option.font)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(self._GRADE_COLOR)
+            rect = option.rect.adjusted(0, 0, -12, 0)
+            painter.drawText(
+                rect,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                grade,
+            )
+        finally:
+            painter.restore()
+
+
 class _CreateModelPanel(QWidget):
     """Unified create-a-model panel combining dataset + training in a clean flow."""
     back_clicked = pyqtSignal()
@@ -5446,6 +5474,7 @@ class SimplePage(QWidget):
         self._dropdown.setMinimumHeight(350)
         self._dropdown.setMaximumHeight(450)
         self._dropdown.setIconSize(QSize(32, 32))
+        self._dropdown.setItemDelegate(_HFArtistDelegate(self._dropdown))
         self._dropdown.itemClicked.connect(self._on_dropdown_clicked)
 
         # ===== MODEL CAROUSEL =====
@@ -7190,10 +7219,12 @@ class SimplePage(QWidget):
                     from ui.widgets.voice_card import VoiceCard
                     icon_px = VoiceCard._make_circular(px, 28)
             # If the user has downloaded and rated this model, ride its
-            # grade badge on the row icon, next to the artist name.
+            # grade badge on the row icon and its letter (cyan, via the
+            # delegate) at the right of the row, next to the name.
             grade = self._rated_grade_for_artist(m["artist"])
             if grade:
                 icon_px = self._badge_icon(icon_px, grade)
+                item.setData(_HFArtistDelegate.GRADE_ROLE, grade)
             if icon_px is not None:
                 item.setIcon(QIcon(icon_px))
 
