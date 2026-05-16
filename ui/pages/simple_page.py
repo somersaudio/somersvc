@@ -5050,7 +5050,7 @@ class _ConvertQueueRow(QWidget):
         self.path = path
         self.status = "queued"
         self.output_path = ""  # converted file, set once this row is done
-        self.transpose = None  # semitone shift Range-Match applied
+        self.sections = None  # how many sections Range-Match split it into
         self._spin_idx = 0
         # Required for the converting-row highlight to actually paint.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -5067,15 +5067,15 @@ class _ConvertQueueRow(QWidget):
         self._name.setToolTip(path)
         row.addWidget(self._name, 1)
 
-        # Semitone shift Range-Match applied (e.g. +12) — filled in
+        # How many sections Range-Match split the clip into — filled in
         # mid-conversion, teal so it reads as a result, not a control.
-        self._shift = QLabel("")
-        self._shift.setStyleSheet(
-            "color: #5ec8b4; font-size: 11px; font-weight: 600;"
+        self._sections_lbl = QLabel("")
+        self._sections_lbl.setStyleSheet(
+            "color: #5ec8b4; font-size: 10px; font-weight: 600;"
             " background: transparent;"
         )
-        self._shift.setVisible(False)
-        row.addWidget(self._shift)
+        self._sections_lbl.setVisible(False)
+        row.addWidget(self._sections_lbl)
 
         # ▶ to preview the converted result — shown only on done rows.
         self._btn_play = QPushButton("▶")
@@ -5146,11 +5146,14 @@ class _ConvertQueueRow(QWidget):
         self.output_path = output_path or ""
         self._refresh_buttons()
 
-    def set_transpose(self, semitones: int):
-        """Show the semitone shift Range-Match applied (e.g. +12)."""
-        self.transpose = int(semitones)
-        self._shift.setText(f"{self.transpose:+d}")
-        self._shift.setVisible(True)
+    def set_sections(self, count: int):
+        """Show how many sections Range-Match split the clip into."""
+        self.sections = int(count)
+        plural = "" if self.sections == 1 else "s"
+        self._sections_lbl.setText(
+            f"Transposed in {self.sections} section{plural}"
+        )
+        self._sections_lbl.setVisible(True)
 
     def set_playing(self, playing: bool):
         self._btn_play.setText("⏸" if playing else "▶")
@@ -5264,9 +5267,9 @@ class _ConvertQueueList(QWidget):
 
     def set_files(self, paths: list):
         """Rebuild the list to match `paths`, carrying over the status,
-        converted-output path and semitone shift of any row whose path
+        converted-output path and section count of any row whose path
         is unchanged."""
-        prev = {p: (r.status, r.output_path, r.transpose)
+        prev = {p: (r.status, r.output_path, r.sections)
                 for p, r in self._rows.items()}
         self._rows = {}
         # Drop existing row widgets, keeping the trailing stretch item.
@@ -5278,12 +5281,12 @@ class _ConvertQueueList(QWidget):
         for p in paths:
             row = _ConvertQueueRow(p)
             if p in prev:
-                status, out, tr = prev[p]
+                status, out, secs = prev[p]
                 row.set_status(status)
                 if out:
                     row.set_output(out)
-                if tr is not None:
-                    row.set_transpose(tr)
+                if secs is not None:
+                    row.set_sections(secs)
             row.remove_requested.connect(self.remove_requested)
             row.play_requested.connect(self._on_row_play)
             self._list_layout.insertWidget(
@@ -5303,10 +5306,10 @@ class _ConvertQueueList(QWidget):
         if status == "converting" and not self._spin_timer.isActive():
             self._spin_timer.start()
 
-    def set_transpose(self, path: str, semitones: int):
+    def set_sections(self, path: str, count: int):
         row = self._rows.get(path)
         if row is not None:
-            row.set_transpose(semitones)
+            row.set_sections(count)
 
     def clear(self):
         self._spin_timer.stop()
@@ -6965,18 +6968,18 @@ class SimplePage(QWidget):
         self._worker.log_line.connect(self._on_batch_log)
         self._worker.finished_ok.connect(self._on_batch_file_done)
         self._worker.error.connect(self._on_batch_file_error)
-        self._worker.transpose_used.connect(self._on_batch_transpose)
+        self._worker.sections_used.connect(self._on_batch_sections)
         self._worker.start()
 
-    def _on_batch_transpose(self, semitones):
-        """Tag the current row with the semitone shift Range-Match
-        applied. Emitted mid-conversion, so _batch_index still points
-        at the file being converted."""
+    def _on_batch_sections(self, count):
+        """Tag the current row with how many sections Range-Match split
+        the clip into. Emitted mid-conversion, so _batch_index still
+        points at the file being converted."""
         if not self._batch_running:
             return
         if 0 <= self._batch_index < len(self._batch_files):
             path = self._batch_files[self._batch_index]
-            self._convert_queue.set_transpose(path, semitones)
+            self._convert_queue.set_sections(path, count)
 
     def _on_batch_log(self, line):
         self._log.append_line(line)
