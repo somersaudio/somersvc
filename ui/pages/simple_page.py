@@ -5305,6 +5305,7 @@ class SimplePage(QWidget):
         self._batch_done = 0
         self._batch_failed = []
         self._batch_results = {}  # source path -> converted output path
+        self._batch_output_dir = ""  # per-batch <artist>_Batch_<N> folder
         self._section_cache = {}
         self._selected_model_idx = -1
         self._optimized_for_model = -1  # model idx the waveform was last optimized for
@@ -6850,6 +6851,12 @@ class SimplePage(QWidget):
         (self._batch_model_dir, self._batch_mt,
          self._batch_model_path, self._batch_config_path) = resolved
 
+        # Each batch lands in its own OUTPUT_DIR/<artist>_Batch_<N>
+        # folder so runs stay organised and never overwrite each other.
+        artist = (os.path.basename(self._batch_model_dir)
+                  if self._batch_model_dir else "converted")
+        self._batch_output_dir = self._make_batch_folder(artist)
+
         self._batch_files = list(self._source_paths)
         self._batch_index = 0
         self._batch_done = 0
@@ -6866,10 +6873,23 @@ class SimplePage(QWidget):
         self._convert_ring.set_progress(0.02)
         self._log.clear_log()
         self._log.append_line(
-            f"Batch: converting {len(self._batch_files)} files..."
+            f"Batch: converting {len(self._batch_files)} files "
+            f"→ {os.path.basename(self._batch_output_dir)}/"
         )
         QTimer.singleShot(50, self._position_bottom_panel)
         self._batch_next()
+
+    def _make_batch_folder(self, artist: str) -> str:
+        """Create and return the next free OUTPUT_DIR/<artist>_Batch_<N>
+        directory. N ascends so a new batch never lands on an older one."""
+        base = artist or "converted"
+        n = 1
+        while True:
+            folder = os.path.join(OUTPUT_DIR, f"{base}_Batch_{n}")
+            if not os.path.exists(folder):
+                os.makedirs(folder, exist_ok=True)
+                return folder
+            n += 1
 
     def _batch_next(self):
         """Advance to the next queued file, or finish the batch."""
@@ -6901,7 +6921,7 @@ class SimplePage(QWidget):
             source_wav=norm_path,
             model_path=self._batch_model_path,
             config_path=self._batch_config_path,
-            output_dir=OUTPUT_DIR,
+            output_dir=self._batch_output_dir,
             transpose=0,
             f0_method="crepe",
             auto_predict_f0=False,
