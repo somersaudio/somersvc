@@ -437,8 +437,12 @@ class _WaveformWidget(QWidget):
             frac = self._x_to_frac(ex)
             idx = self._drag_split_idx
 
-            # Clamp: can't go past neighboring splits (with min section width)
-            min_gap = 0.02  # ~2% of track minimum section
+            # Clamp within the neighbouring splits. The gap is just a
+            # couple of pixels — enough that a section can't collapse to
+            # zero width, but small enough to butt a divider right up
+            # against its neighbour.
+            draw_w = max(1, self.width() - 2 * self.MARGIN_X)
+            min_gap = 2.0 / draw_w
             prev_end = self._sections[idx - 1][0] + min_gap if idx > 0 else min_gap
             next_start = self._sections[idx][1] - min_gap if idx < len(self._sections) else 1.0 - min_gap
             frac = max(prev_end, min(next_start, frac))
