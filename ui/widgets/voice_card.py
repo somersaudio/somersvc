@@ -50,10 +50,11 @@ def grade_for_metadata(metadata: dict) -> tuple[str, str, str]:
     clips = metadata.get("dataset_clips", 0)
     batch = metadata.get("batch_size", 16)
 
-    # Downloaded models without full training data fall back to inspector grade
+    # Downloaded models are untested outside uploads — we don't
+    # auto-grade them. No badge until the user rates one; the
+    # user_grade_override check above handles a rated model.
     if clips == 0 and (metadata.get("sample_rate") or metadata.get("rvc_version")):
-        from services.model_inspector import compute_downloaded_grade
-        return compute_downloaded_grade(metadata)
+        return ("", "#555", "Not rated yet")
 
     if epochs == 0 or clips == 0:
         return ("--", "#555", "No training data yet")
@@ -156,6 +157,10 @@ class VoiceCard(QWidget):
         self.lbl_grade.setStyleSheet(
             f"background-color: #1e1e1e; color: {self._grade_color}; " + badge_style
         )
+        # Downloaded models carry no auto-grade — the badge appears only
+        # once the user rates one (grade_for_metadata returns "" here).
+        if not self._grade:
+            self.lbl_grade.setVisible(False)
 
         # Arrow label (upgrade state) — stacked on top, starts invisible
         upgrade_tip = self._build_upgrade_tip()
@@ -312,82 +317,10 @@ class VoiceCard(QWidget):
         self._fade_in_arrow.start()
 
     def _compute_grade(self) -> tuple[str, str, str]:
-        """Compute quality grade based on dataset duration and total data processed.
-        Returns (grade, color, tooltip)."""
-        epochs = self.metadata.get("epochs", 0)
-        duration = self.metadata.get("dataset_duration_s", 0)
-        clips = self.metadata.get("dataset_clips", 0)
-        batch = self.metadata.get("batch_size", 16)
-
-        # For downloaded models without full training data, use simplified grading
-        if clips == 0 and (self.metadata.get("sample_rate") or self.metadata.get("rvc_version")):
-            from services.model_inspector import compute_downloaded_grade
-            return compute_downloaded_grade(self.metadata)
-
-        if epochs == 0 or clips == 0:
-            return ("--", "#555", "No training data yet")
-
-        data_passes = epochs * batch
-        dur_min = int(duration) // 60
-        dur_sec = int(duration) % 60
-
-        # Duration score
-        if duration >= 600:
-            dur_score = 3
-            dur_tip = "Audio: Excellent (10+ min)"
-        elif duration >= 300:
-            dur_score = 2
-            dur_tip = "Audio: Good (5-10 min)"
-        elif duration >= 120:
-            dur_score = 1
-            dur_tip = f"Audio: Fair ({dur_min}:{dur_sec:02d})"
-        else:
-            dur_score = 0
-            dur_tip = f"Audio: Low ({dur_min}:{dur_sec:02d})"
-
-        # Training score: based on data passes per clip (maturity)
-        maturity = data_passes / clips
-        if maturity >= 2000:
-            train_score = 3
-            train_tip = "Training: Fully converged"
-        elif maturity >= 800:
-            train_score = 2
-            train_tip = "Training: Well trained"
-        elif maturity >= 300:
-            train_score = 1
-            train_tip = "Training: Partially trained"
-        else:
-            train_score = 0
-            train_tip = "Training: Undertrained"
-
-        total = dur_score + train_score
-
-        grades = {
-            6: ("S", "#a855f7"),
-            5: ("A+", "#22c55e"),
-            4: ("A", "#22c55e"),
-            3: ("B+", "#5599ff"),
-            2: ("B", "#5599ff"),
-            1: ("C", "#f59e0b"),
-            0: ("D", "#ef4444"),
-        }
-        grade, color = grades.get(total, ("?", "#888"))
-
-        # Build improvement tips
-        tips = [f"Quality: {grade}", "", dur_tip, train_tip, ""]
-
-        if dur_score < 3:
-            needed = {0: "2+ minutes", 1: "5+ minutes", 2: "10+ minutes"}
-            tips.append(f"Add more audio samples ({needed.get(dur_score, '')} total)")
-
-        if train_score < 3:
-            tips.append("Train for more epochs to improve quality")
-
-        if dur_score >= 3 and train_score >= 3:
-            tips.append("Maximum quality reached!")
-
-        tip = "\n".join(tips)
-        return (grade, color, tip)
+        """Grade for this card. Delegates to grade_for_metadata so the
+        user_grade_override is honoured and downloaded models stay
+        un-graded (empty grade) until the user rates them."""
+        return grade_for_metadata(self.metadata)
 
     def _load_image(self):
         """Load voice image from data/models/{voice}/image.png"""

@@ -4073,14 +4073,14 @@ class _CreateModelPanel(QWidget):
                 trained_str = trained_at[:10]
 
         rows = [f"<b style='font-size:13px;'>{name}</b>"]
+        # Downloaded models carry no auto-grade — the user can rate one
+        # by clicking, and a rated grade then shows. Auto-trained models
+        # keep a read-only rank derived from their training data.
+        is_downloaded = (
+            clips == 0
+            and (metadata.get("sample_rate") or metadata.get("rvc_version"))
+        )
         if grade:
-            # Downloaded models — no local clips, but inspector data —
-            # let the user override the rank by clicking it. Auto-trained
-            # models keep the rank read-only since it's derived from data.
-            is_downloaded = (
-                clips == 0
-                and (metadata.get("sample_rate") or metadata.get("rvc_version"))
-            )
             if is_downloaded:
                 rows.append(
                     f"<span style='color:{grade_color};font-weight:600;'>"
@@ -4093,6 +4093,13 @@ class _CreateModelPanel(QWidget):
                     f"<span style='color:{grade_color};font-weight:600;'>"
                     f"Rank {grade}</span>"
                 )
+        elif is_downloaded:
+            rows.append(
+                "<span style='font-weight:600;'>"
+                "<a href=\"rank-override\" "
+                "style=\"text-decoration:none;color:#888;\">"
+                "Rate this model ▾</a></span>"
+            )
         rows.append("")  # blank line
 
         # Cycle the field-name color in a 4-step palette down the rows so
