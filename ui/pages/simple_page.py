@@ -279,9 +279,10 @@ class _ClipProcessWorker(QThread):
         work_dir = tempfile.mkdtemp(prefix="clip_", dir=self._staging_root)
         stem = os.path.splitext(os.path.basename(path))[0]
 
+        # Keep the source's channels — do NOT downmix to mono here.
+        # Vocal isolation (Demucs) needs real stereo; a mono clip makes
+        # Demucs crash. Training staging downmixes to mono later anyway.
         audio, sr = sf.read(path)
-        if getattr(audio, "ndim", 1) > 1 and audio.shape[1] > 1:
-            audio = audio.mean(axis=1)
         total = len(audio)
         duration = total / sr if sr else 0.0
 

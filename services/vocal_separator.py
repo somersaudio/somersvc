@@ -38,6 +38,30 @@ class VocalSeparator:
         env = os.environ.copy()
         env["PYTHONWARNINGS"] = "ignore"
 
+        # Demucs needs real stereo. Given a mono file it expands the lone
+        # channel into a shared-memory tensor, then crashes on an in-place
+        # op ("more than one element ... refers to a single memory
+        # location"). Feed it a genuine 2-channel copy instead. The copy
+        # keeps the same basename so the output path stays {stem}/.
+        demucs_input = input_path
+        stereo_tmp = None
+        try:
+            import soundfile as _sf
+            import numpy as _np
+            if _sf.info(input_path).channels < 2:
+                data, sr = _sf.read(input_path)
+                if getattr(data, "ndim", 1) == 1:
+                    import tempfile
+                    stereo_tmp = tempfile.mkdtemp(prefix="svc_mono2stereo_")
+                    demucs_input = os.path.join(
+                        stereo_tmp, os.path.basename(input_path)
+                    )
+                    _sf.write(
+                        demucs_input, _np.stack([data, data], axis=1), sr
+                    )
+        except Exception:
+            demucs_input = input_path
+
         # In the bundled .app, sys.executable is SomerSVC (not python). Re-exec
         # ourselves with --demucs-mode so main.py can hand off to demucs.
         if getattr(sys, "frozen", False):
@@ -48,7 +72,7 @@ class VocalSeparator:
             "--two-stems", "vocals",  # only split into vocals + no_vocals
             "-n", "htdemucs",
             "-o", output_dir,
-            input_path,
+            demucs_input,
         ]
 
         process = subprocess.Popen(
@@ -68,6 +92,10 @@ class VocalSeparator:
                 log(stripped)
 
         process.wait()
+
+        if stereo_tmp:
+            import shutil as _sh
+            _sh.rmtree(stereo_tmp, ignore_errors=True)
 
         if process.returncode != 0:
             # Surface Demucs' own output instead of a generic message —
