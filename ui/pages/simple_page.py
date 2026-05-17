@@ -1990,13 +1990,14 @@ class _CreateModelPanel(QWidget):
         epoch_lbl.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
         opts_row.addWidget(epoch_lbl)
 
-        self._txt_epochs = QLineEdit("Auto")
+        self._txt_epochs = QLineEdit()
         self._txt_epochs.setFixedSize(60, 28)
         self._txt_epochs.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._txt_epochs.setToolTip(
-            "Target epoch count. Enter an absolute number (e.g. 5626) or a "
-            "delta (e.g. +1126 to add to the current epoch). On a resume run, "
-            "any value below the current epoch is treated as a delta."
+            "Target epoch count. Left blank, the auto count (shown dim) is "
+            "used. Enter an absolute number (e.g. 5626) or a delta (e.g. "
+            "+1126 to add to the current epoch). On a resume run, any value "
+            "below the current epoch is treated as a delta."
         )
         self._txt_epochs.setStyleSheet("""
             QLineEdit {
@@ -2007,7 +2008,22 @@ class _CreateModelPanel(QWidget):
                 font-size: 11px;
             }
         """)
-        opts_row.addWidget(self._txt_epochs)
+        # "auto" caption beneath the box — same style as the field
+        # captions in Settings. An empty box shows the auto-picked
+        # epoch count as a dim placeholder number.
+        self._lbl_epochs_auto = QLabel("auto")
+        self._lbl_epochs_auto.setStyleSheet(
+            "color: rgba(255, 255, 255, 90); font-size: 10px;"
+            " background: transparent;"
+        )
+        self._lbl_epochs_auto.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _epoch_col = QVBoxLayout()
+        _epoch_col.setContentsMargins(0, 0, 0, 0)
+        _epoch_col.setSpacing(1)
+        _epoch_col.addWidget(self._txt_epochs)
+        _epoch_col.addWidget(self._lbl_epochs_auto)
+        opts_row.addLayout(_epoch_col)
+        self._update_auto_epoch_placeholder()
 
         # Help "?" — hover shows the Auto-epoch lookup table
         epochs_help = QLabel("?")
@@ -2531,6 +2547,8 @@ class _CreateModelPanel(QWidget):
         total = len(self._clips)
         mins, secs = divmod(int(total_dur), 60)
         self._lbl_clips.setText(f"{total} clips  ·  {mins}:{secs:02d} total")
+        # Keep the dim auto-epoch hint in step with the dataset length.
+        self._update_auto_epoch_placeholder(total_dur)
 
     def _silent_clip_item(self, path: str):
         """A leaf row for a silent clip — dimmed text, kept visible as a
@@ -3408,6 +3426,28 @@ class _CreateModelPanel(QWidget):
         "fast":      {"batch": 192, "sec_per_step": 2.5, "label": "A100 SXM"},
         "fastest":   {"batch": 192, "sec_per_step": 1.3, "label": "H100 SXM"},
     }
+
+    def _epoch_count_for_duration(self, total_seconds: float) -> int:
+        """Epoch count auto-picked for a fresh run from total clip
+        duration — the table the Epochs '?' help describes."""
+        if total_seconds <= 0:
+            return 2000   # no clips yet — a neutral default
+        if total_seconds < 180:
+            return 3000
+        if total_seconds < 300:
+            return 2500
+        if total_seconds < 600:
+            return 1500
+        if total_seconds < 1800:
+            return 500
+        return 300
+
+    def _update_auto_epoch_placeholder(self, total_seconds: float = 0.0):
+        """Show the auto-picked epoch count as the box's dim placeholder
+        so an empty (auto) box previews what training will use."""
+        self._txt_epochs.setPlaceholderText(
+            str(self._epoch_count_for_duration(total_seconds))
+        )
 
     def _current_gpu_tier(self) -> str:
         try:
@@ -4932,8 +4972,8 @@ class _CreateModelPanel(QWidget):
                             self._recommended_epochs = 300
                     except Exception:
                         pass
-                # Show the calculated value in the epochs field
-                self._txt_epochs.setText(str(self._recommended_epochs))
+                # The box stays empty (auto) — its dim placeholder
+                # already previews this count.
             # Print the target + an A40 wall-clock estimate so the user
             # knows roughly how long the run will take.
             current_ep_for_est = 0
