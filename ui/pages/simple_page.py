@@ -4990,20 +4990,6 @@ class _CreateModelPanel(QWidget):
                 if g_files:
                     resume_from = os.path.join(model_dir, g_files[-1])
                     self._log.append_line(f"Resuming from checkpoint: {g_files[-1]}")
-                    # Capture the resume epoch so the live progress counter
-                    # can render absolute (total) epochs while the trainer
-                    # reports session-local 0..delta.
-                    try:
-                        import re as _re
-                        _m = _re.search(
-                            r'G_(\d+)\.pth', os.path.basename(resume_from)
-                        )
-                        self._resume_offset = int(_m.group(1)) if _m else 0
-                    except Exception:
-                        self._resume_offset = 0
-        # Fresh (non-resume) runs always start at zero offset.
-        if not resume:
-            self._resume_offset = 0
 
         try:
             from workers.training_worker import TrainingWorker
@@ -5347,12 +5333,12 @@ class _CreateModelPanel(QWidget):
                 epoch = int(m.group(1))
 
         if epoch is not None and epoch > 0:
-            # Trainer reports session-local epoch on a resume run; add the
-            # offset so the user sees TOTAL epochs continuous with the prior
-            # run. The pod-side rename pass produces files matching this
-            # total count when training finishes.
-            offset = int(getattr(self, "_resume_offset", 0) or 0)
-            self._current_epoch = epoch + offset
+            # so-vits-svc-fork restores current_epoch from the checkpoint on
+            # resume (set_current_epoch in its train.py), so every epoch it
+            # reports — the live "Epoch X/Y" line and the G_<epoch>.pth
+            # checkpoints alike — is already the running TOTAL. Use it
+            # directly; adding a resume offset double-counted (e.g. 222/125).
+            self._current_epoch = epoch
             rec = self._recommended_epochs
             if rec > 0:
                 # Training can overshoot the (estimated) target before the
