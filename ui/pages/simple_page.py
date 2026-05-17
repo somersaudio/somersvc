@@ -2443,6 +2443,40 @@ class _CreateModelPanel(QWidget):
         except Exception:
             pass
 
+    def _rebuild_processed_files_from_clips(self):
+        """Reconstruct the file → clips grouping from clip filenames.
+
+        The auto-processor names split clips '<source-stem>_partNN.wav'
+        (older datasets use '<stem>_clipNNN.wav'). On an app restart or
+        artist switch the panel only has a flat clip list — regroup by
+        that shared stem so the expandable file → clips tree shows again
+        instead of a bare flat list. Clips whose names don't match the
+        split pattern are left ungrouped (they render as flat rows).
+        """
+        import re
+        groups: dict = {}
+        order: list = []
+        for p in self._clips:
+            base = os.path.splitext(os.path.basename(p))[0]
+            m = re.match(r'^(.+)_(?:part|clip)\d+$', base)
+            if not m:
+                continue  # not a split clip — _refresh_file_list shows it flat
+            stem = m.group(1)
+            if stem not in groups:
+                groups[stem] = []
+                order.append(stem)
+            groups[stem].append(p)
+        self._processed_files = [
+            {
+                "name": stem,
+                "source": "",
+                "staged_dir": "",
+                "clips": [{"path": p, "silent": False} for p in groups[stem]],
+                "error": "",
+            }
+            for stem in order
+        ]
+
     def _refresh_file_list(self):
         from PyQt6.QtGui import QBrush, QColor
         self._file_list.clear()
@@ -3720,6 +3754,9 @@ class _CreateModelPanel(QWidget):
             self._pending_clips_by_artist.pop(name, None)
         else:
             self._clips = list(self._pending_clips_by_artist.get(name, []))
+        # Rebuild the file → clips grouping from clip filenames so the
+        # expandable tree survives an app restart or an artist switch.
+        self._rebuild_processed_files_from_clips()
         self._refresh_file_list()
         # Highlight selected in grid
         self._update_grid_selection()
