@@ -1321,7 +1321,7 @@ class _ModelCarousel(QWidget):
                     artist = self._models[idx].get("artist", "")
                     if artist:
                         painter.setFont(QFont("Manrope", 8))
-                        painter.setPen(QColor(220, 220, 220, int(180 * opacity)))
+                        painter.setPen(QColor(230, 190, 95, int(180 * opacity)))
                         name_y = draw_y + size + 6
                         painter.drawText(QRectF(x - 70, name_y, 140, 20),
                                          Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
@@ -6006,7 +6006,7 @@ class SimplePage(QWidget):
         # Selected model name
         self._lbl_model_name = QLabel("")
         self._lbl_model_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_model_name.setStyleSheet("color: #ccc; font-size: 14px; font-weight: bold; background: transparent; margin-top: -10px; padding: 0;")
+        self._lbl_model_name.setStyleSheet("color: #e6be5f; font-size: 14px; font-weight: bold; background: transparent; margin-top: -10px; padding: 0;")
         self._lbl_model_name.setFixedHeight(20)
         layout.addWidget(self._lbl_model_name)
 
