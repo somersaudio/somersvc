@@ -2043,6 +2043,17 @@ class _CreateModelPanel(QWidget):
 
         layout.addSpacing(8)
 
+        # Which GPU training will use — reflects Settings → Cloud GPU
+        # (or local training). Refreshed each time the panel is shown.
+        self._lbl_gpu = QLabel("")
+        self._lbl_gpu.setStyleSheet(
+            "color: rgba(255, 255, 255, 90); font-size: 10px;"
+            " background: transparent;"
+        )
+        self._lbl_gpu.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._lbl_gpu)
+        self._refresh_gpu_label()
+
         # Train button
         self._btn_train = QPushButton("Start Training")
         self._btn_train.setFixedHeight(44)
@@ -3404,6 +3415,27 @@ class _CreateModelPanel(QWidget):
             return (load_config() or {}).get("preferred_gpu_tier", "cheapest")
         except Exception:
             return "cheapest"
+
+    def _refresh_gpu_label(self):
+        """Reflect the Settings GPU choice in the label above Train."""
+        try:
+            from services.job_store import load_config
+            cfg = load_config() or {}
+        except Exception:
+            cfg = {}
+        if cfg.get("train_locally"):
+            self._lbl_gpu.setText("Training on this computer")
+        else:
+            tier = cfg.get("preferred_gpu_tier", "cheapest")
+            params = self._TIER_TIMING.get(tier, self._TIER_TIMING["cheapest"])
+            self._lbl_gpu.setText(
+                f"Cloud GPU:  {params['label']}   ·   {tier.capitalize()}"
+            )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Keep the GPU label current with whatever Settings now says.
+        self._refresh_gpu_label()
 
     def _estimate_training_time(
         self, total_epochs: int, current_epochs: int, clips: int,
