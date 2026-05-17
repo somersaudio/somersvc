@@ -7157,6 +7157,15 @@ class SimplePage(QWidget):
         elif self._source_path and self._model_center_hz > 0:
             self._analyze_waveform()
 
+        # Batch mode: keep the focused file's waveform in step with the
+        # model too, so switching artists re-colours its sections live
+        # instead of waiting for another row click to reload it.
+        bw = getattr(self, "_batch_waveform", None)
+        if (bw is not None and bw._samples
+                and bw._model_center_hz != self._model_center_hz):
+            bw._model_center_hz = self._model_center_hz
+            bw._invalidate_wave_cache()
+
         if self._source_median_hz > 0 and self._model_center_hz > 0:
             import math
             semitones = round(12 * math.log2(self._model_center_hz / self._source_median_hz))
