@@ -5061,7 +5061,7 @@ class _CreateModelPanel(QWidget):
                     resume_from=resume_from,
                 )
             self._worker.log_line.connect(self._on_train_log)
-            self._worker.status_changed.connect(lambda s: self._lbl_status.setText(s))
+            self._worker.status_changed.connect(self._on_status_text)
             self._worker.progress.connect(self._progress_bar.setValue)
 
             # New run — clear any GPU-availability status from a prior run so
@@ -5355,11 +5355,16 @@ class _CreateModelPanel(QWidget):
             self._current_epoch = epoch + offset
             rec = self._recommended_epochs
             if rec > 0:
+                # Training can overshoot the (estimated) target before the
+                # stop actually lands — clamp the denominator so the counter
+                # never reads a nonsensical past-target ratio like 222/125.
+                shown_total = max(rec, self._current_epoch)
                 pct = min(int((self._current_epoch / rec) * 100), 100)
                 self._progress_bar.setValue(pct)
-                self._lbl_epoch.setText(f"{self._current_epoch}/{rec}")
+                self._lbl_epoch.setText(f"{self._current_epoch}/{shown_total}")
                 self._lbl_epoch.setVisible(True)
-                self._lbl_status.setText(f"Training... Epoch {self._current_epoch}/{rec}")
+                self._lbl_status.setText(
+                    f"Training... Epoch {self._current_epoch}/{shown_total}")
             # Auto-stop at target. Latch so we don't re-fire when the matching
             # D_<epoch>.pth save (or any later log line) is parsed too.
             if (rec > 0 and self._current_epoch >= rec
@@ -5368,6 +5373,15 @@ class _CreateModelPanel(QWidget):
                     self._auto_stop_fired = True
                     self._log.append_line(f"Reached target of {rec} epochs — stopping & downloading model...")
                     self._worker.request_stop()
+
+    def _on_status_text(self, s):
+        """Update the status line. Once the run leaves the training phase
+        (uploading/downloading the model, or complete), hide the epoch
+        counter so it can't sit there showing a stale, past-target ratio."""
+        self._lbl_status.setText(s)
+        low = (s or "").lower()
+        if any(k in low for k in ("upload", "download", "complete")):
+            self._lbl_epoch.setVisible(False)
 
     def _on_train_done(self, job_id):
         self._training = False
@@ -8216,7 +8230,7 @@ class SimplePage(QWidget):
         )
         panel._resume_worker.log_line.connect(panel._on_train_log)
         panel._resume_worker.status_changed.connect(
-            lambda jid, st: panel._lbl_status.setText(f"Training ({st})")
+            lambda jid, st: panel._on_status_text(f"Training ({st})")
         )
         panel._resume_worker.progress.connect(panel._progress_bar.setValue)
         panel._resume_worker.job_finished.connect(panel._on_train_done)
