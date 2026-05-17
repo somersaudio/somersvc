@@ -2227,16 +2227,19 @@ class _CreateModelPanel(QWidget):
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(False)
-        self._progress_bar.setFixedHeight(8)
+        # Tall enough to fully show the centred percentage text — an 8px
+        # bar clipped the digits top and bottom. Radius scales with the
+        # height so it keeps its rounded-pill shape.
+        self._progress_bar.setFixedHeight(24)
         self._progress_bar.setStyleSheet("""
             QProgressBar {
                 background: rgba(255, 255, 255, 8);
                 border: none;
-                border-radius: 4px;
+                border-radius: 12px;
             }
             QProgressBar::chunk {
                 background: rgba(80, 200, 120, 150);
-                border-radius: 4px;
+                border-radius: 12px;
             }
         """)
         layout.addWidget(self._progress_bar)
