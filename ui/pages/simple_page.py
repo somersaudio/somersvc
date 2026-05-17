@@ -5392,6 +5392,14 @@ class _CreateModelPanel(QWidget):
                 self._refresh_file_list()
         except Exception:
             pass
+        # The model's metadata.json was just rewritten with the new epoch
+        # count — refresh the left-side panels so they show it now instead
+        # of staying stale until the next artist reselect.
+        try:
+            self._update_model_info(self._selected_name)
+            self._update_metadata_panel(self._selected_name)
+        except Exception:
+            pass
         self._progress_bar.setValue(100)
         self._lbl_epoch.setVisible(False)
         self._lbl_status.setText("Training complete! Model is ready.")
