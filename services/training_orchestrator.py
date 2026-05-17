@@ -105,6 +105,19 @@ class TrainingOrchestrator:
         self._current_status = status
         self.on_status(status)
 
+    def _report_download_progress(self, fraction: float):
+        """While the trained model downloads, surface a live percentage so
+        the user isn't left staring at a static 'downloading'. Drives the
+        progress bar across its final 90→100 stretch and shows the percent
+        in the status line. Throttled to whole-percent changes."""
+        fraction = max(0.0, min(1.0, fraction))
+        pct = int(fraction * 100)
+        if pct == getattr(self, "_last_dl_pct", -1):
+            return
+        self._last_dl_pct = pct
+        self.on_progress(90 + round(fraction * 10))
+        self._status(f"Downloading model… {pct}%")
+
     def _check_stopped(self):
         """Raise RuntimeError("stopped") if the user has hit Stop. Called at
         every phase boundary so a pre-training stop bails out promptly
@@ -802,7 +815,13 @@ class TrainingOrchestrator:
 
                 latest_g = g_files[-1]
                 self._log(f"Downloading checkpoint: {latest_g}")
-                ssh.download_file(f"/workspace/logs/44k/{latest_g}", str(model_dir / latest_g))
+                self._last_dl_pct = -1
+                def _ssh_progress(transferred, total):
+                    if total > 0:
+                        self._report_download_progress(transferred / total)
+                ssh.download_file(f"/workspace/logs/44k/{latest_g}",
+                                  str(model_dir / latest_g),
+                                  progress_cb=_ssh_progress)
                 ssh.download_file("/workspace/configs/44k/config.json", str(model_dir / "config.json"))
                 self._save_metadata(model_dir, latest_g, previous_epochs, total_duration, total_clips)
                 self._log("Model downloaded successfully")
@@ -992,7 +1011,15 @@ class TrainingOrchestrator:
         checkpoint_name = latest_key.split("/")[-1]
 
         self._log(f"Downloading {checkpoint_name} from cloud...")
-        r2.download_file(latest_key, str(model_dir / checkpoint_name))
+        self._last_dl_pct = -1
+        _dl_total = r2.head_size(latest_key)
+        _dl_done = {"n": 0}
+        def _r2_progress(chunk):
+            _dl_done["n"] += chunk
+            if _dl_total > 0:
+                self._report_download_progress(_dl_done["n"] / _dl_total)
+        r2.download_file(latest_key, str(model_dir / checkpoint_name),
+                         callback=_r2_progress)
 
         config_key = f"{r2_prefix}/config.json"
         if r2.file_exists(config_key):
