@@ -2051,6 +2051,11 @@ class _CreateModelPanel(QWidget):
         _epoch_col.setSpacing(1)
         _epoch_col.addWidget(self._txt_epochs)
         _epoch_col.addWidget(self._lbl_epochs_auto)
+        # The "auto" caption makes this column taller than the box, so the
+        # row was centring the box higher than the Type field beside it.
+        # Pad the top by the caption's height: the box then sits centred in
+        # the column — level with the Type box — and "auto" hangs beneath.
+        _epoch_col.insertSpacing(0, self._lbl_epochs_auto.sizeHint().height())
         opts_row.addLayout(_epoch_col)
         self._update_auto_epoch_placeholder()
 
