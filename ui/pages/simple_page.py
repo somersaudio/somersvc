@@ -1710,6 +1710,35 @@ class _CreateModelPanel(QWidget):
         self.update()
 
     def _init_ui(self):
+        # State — initialised before any widgets are built so UI builders
+        # that preview state (e.g. _update_auto_epoch_placeholder, which
+        # reads _selected_name) never hit an unset attribute on launch.
+        self._clips = []
+        # Grouped clip model: one record per uploaded file —
+        # {name, source, staged_dir, clips:[{path,silent}], error}.
+        self._processed_files = []
+        self._clip_workers = []
+        self._selected_name = ""
+        self._training = False
+        self._worker = None
+        # Initialise training-progress fields so a reattach via ResumeWorker
+        # can read them in _on_train_log without an AttributeError fatal.
+        self._recommended_epochs = 0
+        self._current_epoch = 0
+        self._auto_stop_fired = False
+        self._last_log_ckpt_epoch = None
+        self._last_log_was_wait = False
+        # When resuming training, the trainer reports session-local epoch
+        # numbers (0..delta). We add this offset so the live counter shows
+        # TOTAL epochs continuous with the previous run.
+        self._resume_offset = 0
+        self._image_cache_dir = os.path.join(CACHE_DIR, "artist_thumbs")
+        # Per-artist staged clips for pending (not-yet-trained) artists.
+        # Persists clip selections across artist switches before the dataset
+        # dir exists on disk.
+        self._pending_clips_by_artist: dict = {}
+        self.setAcceptDrops(True)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 20, 30, 20)
         layout.setSpacing(12)
@@ -2239,34 +2268,6 @@ class _CreateModelPanel(QWidget):
         # Lift it off the bottom so it doesn't collide with the
         # "Open Output Folder" / "Set Output Folder" links beneath the panel.
         layout.addSpacing(36)
-
-        # State
-        self._clips = []
-        # Grouped clip model: one record per uploaded file —
-        # {name, source, staged_dir, clips:[{path,silent}], error}.
-        self._processed_files = []
-        self._clip_workers = []
-        self._selected_name = ""
-        self._training = False
-        self._worker = None
-        # Initialise training-progress fields so a reattach via ResumeWorker
-        # can read them in _on_train_log without an AttributeError fatal.
-        self._recommended_epochs = 0
-        self._current_epoch = 0
-        self._auto_stop_fired = False
-        self._last_log_ckpt_epoch = None
-        self._last_log_was_wait = False
-        # When resuming training, the trainer reports session-local epoch
-        # numbers (0..delta). We add this offset so the live counter shows
-        # TOTAL epochs continuous with the previous run.
-        self._resume_offset = 0
-        self._image_cache_dir = os.path.join(CACHE_DIR, "artist_thumbs")
-        # Per-artist staged clips for pending (not-yet-trained) artists.
-        # Persists clip selections across artist switches before the dataset
-        # dir exists on disk.
-        self._pending_clips_by_artist: dict = {}
-
-        self.setAcceptDrops(True)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
