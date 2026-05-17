@@ -39,7 +39,7 @@ ensure_dirs()
 
 
 def auto_update():
-    """Pull latest code from GitHub on launch, reinstall deps if needed.
+    """Fast-forward to the latest code from GitHub on launch.
 
     Only runs in dev mode (running from source). The frozen .app uses
     services.app_updater to check GitHub Releases and self-replace.
@@ -49,41 +49,46 @@ def auto_update():
     try:
         import subprocess
 
-        # Stash any local changes so pull doesn't fail
-        subprocess.run(
-            ["git", "stash", "--include-untracked"],
+        # Never touch uncommitted work. A previous version git-stashed
+        # local changes before pulling and never restored them — so every
+        # dev launch silently ate the developer's edits into the stash
+        # list. If the tree is dirty, skip the update entirely.
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
             cwd=app_dir, capture_output=True, text=True, timeout=10,
         )
+        if dirty.returncode != 0 or dirty.stdout.strip():
+            return
 
         result = subprocess.run(
             ["git", "pull", "--ff-only", "origin", "main"],
             cwd=app_dir, capture_output=True, text=True, timeout=15,
         )
+        if result.returncode != 0 or "Already up to date" in result.stdout:
+            return
+        print(f"Updated: {result.stdout.strip()}")
 
-        if "Already up to date" not in result.stdout:
-            print(f"Updated: {result.stdout.strip()}")
+        # Re-download .env in case keys changed
+        env_url = "https://gist.githubusercontent.com/somersaudio/ad9423ac7f83b3035850afcbd0a2fc9f/raw/.env"
+        try:
+            subprocess.run(
+                ["curl", "-sL", env_url, "-o", os.path.join(app_dir, ".env")],
+                timeout=10,
+            )
+        except Exception:
+            pass
 
-            # Re-download .env in case keys changed
-            env_url = "https://gist.githubusercontent.com/somersaudio/ad9423ac7f83b3035850afcbd0a2fc9f/raw/.env"
+        # Reinstall deps if requirements.txt was updated
+        req_file = os.path.join(app_dir, "requirements.txt")
+        if os.path.exists(req_file):
+            pip = os.path.join(os.path.dirname(sys.executable), "pip")
             try:
                 subprocess.run(
-                    ["curl", "-sL", env_url, "-o", os.path.join(app_dir, ".env")],
-                    timeout=10,
+                    [pip, "install", "-q", "-r", req_file],
+                    cwd=app_dir, capture_output=True, text=True, timeout=120,
                 )
             except Exception:
                 pass
-
-            # Reinstall deps if requirements.txt was updated
-            req_file = os.path.join(app_dir, "requirements.txt")
-            if os.path.exists(req_file):
-                pip = os.path.join(os.path.dirname(sys.executable), "pip")
-                try:
-                    subprocess.run(
-                        [pip, "install", "-q", "-r", req_file],
-                        cwd=app_dir, capture_output=True, text=True, timeout=120,
-                    )
-                except Exception:
-                    pass
     except Exception:
         pass  # No git, no internet, or not a git repo — skip silently
 
@@ -122,6 +127,63 @@ def _hide_subprocess_from_dock():
         )
     except Exception:
         pass
+
+
+def _dispatch_subprocess_worker():
+    """Run re-exec'd worker processes and exit — never fall through to the GUI.
+
+    In the frozen .app, sys.executable IS the SomerSVC binary, so every
+    worker process so-vits-svc-fork's pipeline spawns re-execs this whole
+    app. Preprocessing uses joblib/loky; training uses a PyTorch
+    DataLoader. Those (and their resource-trackers) launch children as:
+
+        SomerSVC -m joblib.externals.loky.backend.popen_loky_posix ...
+        SomerSVC -c "from ...resource_tracker import main; main(...)"
+        SomerSVC --multiprocessing-fork tracker_fd=.. pipe_handle=..
+
+    PyInstaller's bootloader silently ignores -m / -c / --multiprocessing-fork
+    and just runs the GUI. So each worker booted a window AND auto-resumed
+    training -> spawned more workers: an exponential fork-bomb of app windows.
+
+    multiprocessing.freeze_support() does NOT fix this on macOS — the public
+    API is gated to sys.platform == 'win32' and is a no-op everywhere else
+    (that's why the v1.0.40 attempt didn't work). We dispatch every worker
+    shape to its real entry-point here instead.
+    """
+    argv = sys.argv
+    if len(argv) < 2:
+        return  # bare launch -> GUI
+
+    # --svc-mode / --demucs-mode are our own re-execs; main() handles them.
+    # Their downstream svc/demucs CLI args legitimately contain -c / -m, so
+    # we must bail out here before the -m/-c scan below ever sees them.
+    if argv[1] in ("--svc-mode", "--demucs-mode"):
+        return
+
+    # PyTorch DataLoader + stdlib multiprocessing 'spawn' children.
+    if argv[1] == "--multiprocessing-fork":
+        from multiprocessing.spawn import freeze_support as _mp_freeze
+        _mp_freeze()      # runs spawn_main(**kwds) then sys.exit()
+        os._exit(0)       # defensive — unreachable when actually forking
+
+    # joblib/loky workers (-m ...popen_loky_posix) and resource-trackers
+    # (-c "from ... import main; main(...)"). Interpreter flags may precede
+    # the -m/-c token, so scan rather than assume position 1.
+    for i in range(1, len(argv) - 1):
+        tok = argv[i]
+        if tok == "-m":
+            mod = argv[i + 1]
+            sys.argv = [mod] + argv[i + 2:]
+            import runpy
+            runpy.run_module(mod, run_name="__main__", alter_sys=True)
+            os._exit(0)
+        if tok == "-c":
+            code = argv[i + 1]
+            sys.argv = ["-c"] + argv[i + 2:]
+            exec(compile(code, "<somersvc-worker>", "exec"),
+                 {"__name__": "__main__"})
+            os._exit(0)
+    # no worker markers — fall through to the normal GUI launch
 
 
 def main():
@@ -342,13 +404,12 @@ def _run_update_with_progress(parent_window, asset_url: str):
 
 
 if __name__ == "__main__":
-    # MUST be the first thing in __main__. so-vits-svc-fork's training
-    # and preprocessing spawn worker processes (pebble, joblib, PyTorch
-    # DataLoader). In the frozen .app those workers re-exec the bundle
-    # binary — and without freeze_support() each one falls through to
-    # the GUI branch and opens a window, then auto-resumes training and
-    # spawns more workers: a runaway fork-bomb of app windows.
-    # freeze_support() makes a spawned worker run its task and exit.
-    import multiprocessing
-    multiprocessing.freeze_support()
+    # MUST be the first thing in __main__. so-vits-svc-fork's training and
+    # preprocessing spawn worker processes (joblib/loky, PyTorch DataLoader).
+    # In the frozen .app those workers re-exec the bundle binary; if they
+    # fall through to the GUI each opens a window and auto-resumes training,
+    # spawning more workers — a runaway fork-bomb. _dispatch_subprocess_worker
+    # runs the worker's real entry-point and exits before reaching the GUI.
+    # (Guarded by __main__ so loky's __mp_main__ re-import never recurses.)
+    _dispatch_subprocess_worker()
     main()
