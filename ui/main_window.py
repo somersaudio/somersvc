@@ -490,9 +490,17 @@ class MainWindow(QMainWindow):
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, self._position_gear_buttons)
         self._position_window_controls()
-        # Re-assert the rounded content layer (survives any layer
-        # reconfiguration Qt does on resize).
-        self._apply_rounded_corners()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Round the window corners once it is fully on screen. This MUST be
+        # deferred to the next event-loop turn — calling winId()/objc inside
+        # the show/resize path caught the native window mid-creation and
+        # crashed objc_msgSend on an invalid view. Applied once.
+        if not getattr(self, "_corners_rounded", False):
+            self._corners_rounded = True
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, self._apply_rounded_corners)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -525,15 +533,24 @@ class MainWindow(QMainWindow):
         clipped-away corner notches are transparent. ctypes/objc so we
         don't have to bundle PyObjC.
         """
-        import sys
-        if sys.platform != "darwin":
-            return
         try:
+            from PyQt6.QtGui import QGuiApplication
+            if QGuiApplication.platformName() != "cocoa":
+                return  # objc/NSView only exist on the native macOS platform
+
+            # winId() can hand back an invalid placeholder if the native
+            # window isn't fully created yet. A real NSView pointer is a
+            # heap address — never a tiny integer — so bail rather than
+            # message a junk pointer (messaging 0x1 crashed objc_msgSend).
+            wid = int(self.winId())
+            if wid < 0x1000:
+                return
+
             import ctypes
             objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.dylib")
             objc.sel_registerName.restype = ctypes.c_void_p
             objc.objc_msgSend.restype = ctypes.c_void_p
-            view = ctypes.c_void_p(int(self.winId()))   # NSView* on macOS
+            view = ctypes.c_void_p(wid)   # NSView* on macOS
 
             # view.setWantsLayer:YES — ensure the view is layer-backed
             objc.objc_msgSend.argtypes = [
