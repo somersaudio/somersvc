@@ -1496,9 +1496,9 @@ class _ConvertButton(QWidget):
         painter.end()
 
 
-# Item-data role flagging a clip row as silent (set on silent clip
-# items so the delegate can paint the red "silent" marker).
-_CLIP_SILENT_ROLE = Qt.ItemDataRole.UserRole + 1
+# Item-data roles for clip-tree rows.
+_CLIP_SILENT_ROLE = Qt.ItemDataRole.UserRole + 1   # silent-clip flag
+_CLIP_RECORD_ROLE = Qt.ItemDataRole.UserRole + 2   # upload record (file nodes)
 
 
 class _ClipBadgeDelegate(QStyledItemDelegate):
@@ -1917,16 +1917,6 @@ class _CreateModelPanel(QWidget):
         self._btn_remove_clip.mousePressEvent = lambda e: self._remove_selected_clip()
         action_row.addWidget(self._btn_remove_clip)
 
-        dot3 = QLabel(" · ")
-        dot3.setStyleSheet("color: rgba(255, 255, 255, 30); font-size: 10px; background: transparent;")
-        action_row.addWidget(dot3)
-
-        self._btn_split_clip = QLabel("Split selected")
-        self._btn_split_clip.setStyleSheet("color: rgba(94, 200, 180, 80); font-size: 10px; background: transparent;")
-        self._btn_split_clip.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_split_clip.mousePressEvent = lambda e: self._split_selected_clip()
-        action_row.addWidget(self._btn_split_clip)
-
         dot_norm = QLabel(" · ")
         dot_norm.setStyleSheet("color: rgba(255, 255, 255, 30); font-size: 10px; background: transparent;")
         action_row.addWidget(dot_norm)
@@ -1938,12 +1928,12 @@ class _CreateModelPanel(QWidget):
         self._btn_normalize_clip.mousePressEvent = lambda e: self._normalize_selected_clips()
         action_row.addWidget(self._btn_normalize_clip)
 
-        # Hide isolate / remove / split / normalize (and the dots that
-        # separate them) until the user actually selects a clip.
+        # Hide isolate / remove / normalize (and the dots that separate
+        # them) until the user actually selects a clip. Splitting is
+        # automatic now — there's no Split button.
         self._selection_only_widgets = [
             dot1, self._btn_isolate,
             dot2, self._btn_remove_clip,
-            dot3, self._btn_split_clip,
             dot_norm, self._btn_normalize_clip,
         ]
         for w in self._selection_only_widgets:
@@ -2316,44 +2306,6 @@ class _CreateModelPanel(QWidget):
         if worker in self._clip_workers:
             self._clip_workers.remove(worker)
 
-    def _filter_silent_clips(self, paths: list) -> tuple[list, int]:
-        """Return (kept_paths, removed_count). A clip is "silent" when its
-        RMS over the first ~10s is below ~-50 dBFS — quiet enough that it
-        can't possibly be useful training material.
-        """
-        try:
-            import soundfile as _sf
-            import numpy as _np
-        except Exception:
-            return list(paths), 0
-
-        kept = []
-        removed = 0
-        for p in paths:
-            try:
-                with _sf.SoundFile(p) as f:
-                    max_frames = min(f.frames, f.samplerate * 10)
-                    if max_frames <= 0:
-                        removed += 1
-                        continue
-                    data = f.read(max_frames, dtype="float32")
-                if getattr(data, "ndim", 1) > 1:
-                    data = data.mean(axis=1)
-                if data.size == 0:
-                    removed += 1
-                    continue
-                rms = float(_np.sqrt(_np.mean(data ** 2)))
-                # -50 dBFS ≈ 0.00316 linear
-                if rms < 0.003:
-                    removed += 1
-                    continue
-                kept.append(p)
-            except Exception:
-                # On read error, give the clip the benefit of the doubt —
-                # the user can still preview/remove it manually.
-                kept.append(p)
-        return kept, removed
-
     def _show_toast(self, text: str, duration_ms: int = 2500) -> None:
         """Floating pill-shaped message that fades in, holds, and fades out."""
         from PyQt6.QtCore import (
@@ -2538,8 +2490,10 @@ class _CreateModelPanel(QWidget):
                 f"✓  {rec.get('name', 'Audio file')}"
                 f"    ·    {n_train} clip{'s' if n_train != 1 else ''}"
             ])
-            # Selecting the file node previews the original upload.
+            # Selecting the file node previews the original upload; the
+            # record rides along so Remove can drop the whole file.
             file_node.setData(0, Qt.ItemDataRole.UserRole, rec.get("source"))
+            file_node.setData(0, _CLIP_RECORD_ROLE, rec)
             file_node.setForeground(0, QColor(125, 200, 150))
             _fnt = QFont()
             _fnt.setBold(True)
@@ -2728,46 +2682,6 @@ class _CreateModelPanel(QWidget):
         # Unreadable — just byte-copy and let the pod sort it out
         shutil.copy2(src, dst)
 
-    def _split_clip_at_path(self, path: str) -> list:
-        """Split one clip into ~7-second chunks; returns the new paths or [] on skip."""
-        if not os.path.exists(path):
-            return []
-        import soundfile as _sf
-        try:
-            info = _sf.info(path)
-            duration = info.duration
-        except Exception:
-            return []
-        if duration <= 10.0:
-            return []  # too short — skip
-
-        chunk_sec = 7.0
-        audio, sr = _sf.read(path)
-        if getattr(audio, "ndim", 1) > 1 and audio.shape[1] > 1:
-            audio = audio.mean(axis=1).astype(audio.dtype, copy=False)
-        parent_dir = os.path.dirname(path)
-        stem = os.path.splitext(os.path.basename(path))[0]
-        new_paths = []
-        chunk_idx = 1
-        pos = 0
-        total_samples = len(audio)
-        while pos < total_samples:
-            end = min(pos + int(chunk_sec * sr), total_samples)
-            remaining = total_samples - end
-            if remaining > 0 and remaining < int(3.0 * sr):
-                end = total_samples
-            chunk = audio[pos:end]
-            chunk_path = os.path.join(parent_dir, f"{stem}_part{chunk_idx:02d}.wav")
-            _sf.write(chunk_path, chunk, sr)
-            new_paths.append(chunk_path)
-            chunk_idx += 1
-            pos = end
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        return new_paths
-
     def _on_clip_selection_changed(self):
         """Show isolate / remove / split only when at least one clip is selected."""
         has_selection = bool(self._file_list.selectedItems())
@@ -2799,45 +2713,6 @@ class _CreateModelPanel(QWidget):
                 if p and p not in paths:
                     paths.append(p)
         return paths
-
-    def _split_selected_clip(self):
-        """Split each selected clip into ~7s chunks (clips ≤ 10s are skipped)."""
-        targets = self._selected_clip_paths()
-        if not targets:
-            return
-        split_count = 0
-        skipped_short = 0
-        for path in targets:
-            try:
-                idx = self._clips.index(path)
-            except ValueError:
-                continue
-            new_paths = self._split_clip_at_path(path)
-            if not new_paths:
-                skipped_short += 1
-                continue
-            self._clips.pop(idx)
-            for j, p in enumerate(new_paths):
-                self._clips.insert(idx + j, p)
-            split_count += 1
-
-        # After splitting, drop any chunks that are essentially silence so
-        # the user doesn't waste pod time training on quiet gaps.
-        silent_removed = 0
-        if split_count:
-            kept, silent_removed = self._filter_silent_clips(self._clips)
-            self._clips = kept
-
-        self._refresh_file_list()
-        if skipped_short and split_count == 0:
-            self._lbl_clips.setText("Selected clips are too short to split (need > 10s)")
-        elif skipped_short:
-            self._lbl_clips.setText(
-                f"Split {split_count} clip(s); skipped {skipped_short} under 10 seconds"
-            )
-        if silent_removed:
-            plural = "s" if silent_removed != 1 else ""
-            self._show_toast(f"{silent_removed} silent track{plural} removed")
 
     def _normalize_selected_clips(self):
         """Bring each selected clip's RMS to -12 dBFS, peak-safe (no clipping)."""
@@ -2935,13 +2810,32 @@ class _CreateModelPanel(QWidget):
             return False
 
     def _remove_selected_clip(self):
-        """Remove every selected clip (or the active row if nothing's selected)."""
-        paths = self._selected_clip_paths()
-        if not paths:
+        """Remove selected clips — or a whole uploaded file when its
+        file node is selected (record, clips, and staged copies)."""
+        items = self._file_list.selectedItems()
+        if not items:
+            cur = self._file_list.currentItem()
+            if cur is not None:
+                items = [cur]
+        if not items:
             return
-        for p in paths:
-            if p in self._clips:
-                self._clips.remove(p)
+        for it in items:
+            rec = it.data(0, _CLIP_RECORD_ROLE)
+            if rec is not None:
+                # File node — drop the whole uploaded file.
+                for c in rec.get("clips", []):
+                    if c["path"] in self._clips:
+                        self._clips.remove(c["path"])
+                staged = rec.get("staged_dir")
+                if staged and os.path.isdir(staged):
+                    import shutil
+                    shutil.rmtree(staged, ignore_errors=True)
+                if rec in self._processed_files:
+                    self._processed_files.remove(rec)
+            else:
+                p = it.data(0, Qt.ItemDataRole.UserRole)
+                if p in self._clips:
+                    self._clips.remove(p)
         self._refresh_file_list()
 
     def _ask_export_options(self, name: str, dataset_files: list, dataset_dur: float):
