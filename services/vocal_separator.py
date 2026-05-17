@@ -60,15 +60,23 @@ class VocalSeparator:
             env=env,
         )
 
+        output_lines = []
         for line in iter(process.stdout.readline, ""):
             stripped = line.rstrip("\n")
             if stripped.strip():
+                output_lines.append(stripped)
                 log(stripped)
 
         process.wait()
 
         if process.returncode != 0:
-            raise RuntimeError("Vocal separation failed")
+            # Surface Demucs' own output instead of a generic message —
+            # the tail almost always names the real cause (out of
+            # memory, unreadable/too-short input, missing model, ...).
+            tail = "\n".join(output_lines[-12:]) or "(no output captured)"
+            raise RuntimeError(
+                f"Demucs exited with code {process.returncode}.\n{tail}"
+            )
 
         # Demucs outputs to: output_dir/htdemucs/{stem}/vocals.wav and no_vocals.wav
         demucs_dir = os.path.join(output_dir, "htdemucs", stem)
