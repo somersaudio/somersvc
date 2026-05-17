@@ -2046,7 +2046,9 @@ class _CreateModelPanel(QWidget):
         opts_row.addWidget(epoch_lbl)
 
         self._txt_epochs = QLineEdit()
-        self._txt_epochs.setFixedSize(60, 28)
+        # Wide enough for 4-5 digit epoch counts — at 60px the box elided
+        # the auto-count placeholder with an ellipsis ("1010" -> "101…").
+        self._txt_epochs.setFixedSize(96, 28)
         self._txt_epochs.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._txt_epochs.setToolTip(
             "Target epoch count. Left blank, the auto count (shown dim) is "
