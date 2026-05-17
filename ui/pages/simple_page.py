@@ -7626,10 +7626,43 @@ class SimplePage(QWidget):
         self._batch_norm.finished.connect(self._batch_convert_file)
         self._batch_norm.start()
 
+    def _batch_custom_data(self, path):
+        """Return (custom_sections, custom_transposes) for a queued batch
+        file from its stored waveform-editor state. Sections are converted
+        from normalized fractions to absolute seconds, mirroring
+        _get_custom_sections() for single-file mode. Returns (None, None)
+        when Range-Match is off, the file hasn't been analysed yet, or it
+        has a single section (nothing to split) — the worker then falls
+        back to computing its own split via smart_transpose."""
+        if not self._btn_range_match.isChecked():
+            return None, None
+        state = self._batch_wave_state.get(path)
+        if not state:
+            return None, None
+        sections = state.get("sections") or []
+        transposes = state.get("transposes") or []
+        if len(sections) <= 1:
+            return None, None
+        try:
+            import soundfile as _sf
+            duration = _sf.info(path).duration
+        except Exception:
+            return None, None
+        custom_sections = [(s * duration, e * duration) for s, e in sections]
+        custom_transposes = list(transposes) if transposes else None
+        return custom_sections, custom_transposes
+
     def _batch_convert_file(self, norm_path):
         """Run one InferenceWorker for the current batch file."""
         if not self._batch_running:
             return
+        # Per-file waveform edits: if the user focused this file and
+        # adjusted its sections/transposes, honour them; otherwise the
+        # stored state holds the analyser's own split. Either way the
+        # batch file converts with the same section data the waveform
+        # editor shows for it.
+        path = self._batch_files[self._batch_index]
+        custom_sections, custom_transposes = self._batch_custom_data(path)
         self._worker = InferenceWorker(
             source_wav=norm_path,
             model_path=self._batch_model_path,
@@ -7648,6 +7681,8 @@ class SimplePage(QWidget):
             smart_transpose=self._btn_range_match.isChecked() and self._model_center_hz > 0,
             model_center_hz=self._model_center_hz,
             max_sections=20,
+            custom_sections=custom_sections,
+            custom_transposes=custom_transposes,
         )
         self._worker.log_line.connect(self._on_batch_log)
         self._worker.finished_ok.connect(self._on_batch_file_done)
