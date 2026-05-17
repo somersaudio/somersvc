@@ -7916,8 +7916,20 @@ class SimplePage(QWidget):
 
         try:
             from services.hf_model_browser import download_model
-            download_model(folder, dest, on_log=lambda m: (
-                self._search.setPlaceholderText(m), QApplication.processEvents()))
+            import re as _re
+
+            def _dl_progress(m):
+                # Route the % into the animated "downloading" spinner — it
+                # never fit in the narrow dropdown search bar, which keeps
+                # the static "Downloading <artist>..." placeholder set above.
+                pm = _re.search(r"(\d+)%", m)
+                if pm:
+                    self._spinner_text = f"downloading {pm.group(1)}%"
+                elif "Extracting" in m:
+                    self._spinner_text = "extracting"
+                QApplication.processEvents()
+
+            download_model(folder, dest, on_log=_dl_progress)
 
             from services.model_inspector import inspect_model
             import json
