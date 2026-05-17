@@ -1870,8 +1870,15 @@ class _CreateModelPanel(QWidget):
 
         # Selected model label (under the carousel)
         self._lbl_selected = QLabel("")
-        self._lbl_selected.setStyleSheet("color: rgba(255, 255, 255, 50); font-size: 11px; background: transparent;")
+        self._lbl_selected.setStyleSheet("color: #e6be5f; font-size: 14px; font-weight: bold; background: transparent;")
         self._lbl_selected.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Slight gold glow — same treatment as the convert-page carousel name.
+        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+        _sel_glow = QGraphicsDropShadowEffect(self._lbl_selected)
+        _sel_glow.setOffset(0, 0)
+        _sel_glow.setBlurRadius(12)
+        _sel_glow.setColor(QColor(230, 190, 95, 170))
+        self._lbl_selected.setGraphicsEffect(_sel_glow)
         layout.addWidget(self._lbl_selected)
 
         # "+ New artist" input — left-aligned above the Audio Clips section
@@ -3796,7 +3803,6 @@ class _CreateModelPanel(QWidget):
 
         self._selected_name = name
         self._lbl_selected.setText(name)
-        self._lbl_selected.setStyleSheet("color: rgba(255, 255, 255, 80); font-size: 12px; font-weight: bold; background: transparent;")
         self._txt_new_name.clear()
         self._update_panel_background(name)
         # Kick off Spotify lookup if we don't already have an image for this name
@@ -3918,7 +3924,6 @@ class _CreateModelPanel(QWidget):
                 self._pending_clips_by_artist[prev] = list(self._clips)
         self._selected_name = name
         self._lbl_selected.setText(name)
-        self._lbl_selected.setStyleSheet("color: rgba(255, 255, 255, 80); font-size: 12px; font-weight: bold; background: transparent;")
         # Restore pending clips for this name if we already had some staged
         self._clips = list(self._pending_clips_by_artist.get(name, []))
         self._refresh_file_list()
