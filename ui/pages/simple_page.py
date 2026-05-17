@@ -3522,11 +3522,30 @@ class _CreateModelPanel(QWidget):
             return 500
         return 300
 
+    def _is_resumable_svc_model(self, name: str) -> bool:
+        """True only for an SVC model this app can resume-train — one whose
+        G_<N>.pth checkpoints are epoch-numbered. Downloaded / RVC models
+        name checkpoints by training STEP and use a different architecture,
+        so their checkpoint numbers are not epoch counts."""
+        if not name:
+            return False
+        meta = self._load_model_metadata(name) or {}
+        if str(meta.get("model_type", "")).lower() == "rvc":
+            return False
+        if str(meta.get("source", "")).lower() == "downloaded":
+            return False
+        return True
+
     def _latest_checkpoint_epoch(self) -> int:
         """Highest epoch among the selected model's G_*.pth checkpoints,
         or 0 if it has none yet (a fresh model)."""
         name = (self._selected_name or "").strip()
         if not name:
+            return 0
+        # A downloaded / RVC model's G_<N>.pth is step-numbered, not epoch-
+        # numbered — treating that number as epochs produced absurd auto
+        # targets (G_81000 -> a "101,250 epoch" suggestion).
+        if not self._is_resumable_svc_model(name):
             return 0
         best = 0
         try:
@@ -3813,9 +3832,14 @@ class _CreateModelPanel(QWidget):
         has_any_model = False
         if os.path.isdir(model_dir):
             files = os.listdir(model_dir)
-            has_svc_checkpoint = any(f.startswith("G_") and f.endswith(".pth") for f in files)
+            has_svc_checkpoint = (
+                any(f.startswith("G_") and f.endswith(".pth") for f in files)
+                and self._is_resumable_svc_model(name)
+            )
             has_any_model = any(f.endswith(".pth") for f in files)
-        # Continue Training only makes sense for SVC checkpoints we know how to resume
+        # Continue Training only makes sense for SVC models we trained
+        # ourselves — never for downloaded / RVC models, whose step-numbered
+        # G_*.pth is not a resumable SVC epoch checkpoint.
         self._btn_continue_train.setVisible(has_svc_checkpoint)
         # Delete Model is available for any trained model (SVC or RVC)
         self._btn_delete_model.setVisible(has_any_model)
