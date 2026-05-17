@@ -5994,6 +5994,22 @@ class SimplePage(QWidget):
         self._spinner_label.setVisible(False)
         search_row.addWidget(self._spinner_label)
 
+        # Batch "transposing" indicator — a rotating glyph plus a file
+        # counter, shown top-right while a batch conversion runs. The
+        # counter advancing per file makes the heavy, UI-stalling
+        # transpose pass read as progress rather than a freeze.
+        self._lbl_transposing = QLabel("")
+        self._lbl_transposing.setStyleSheet(
+            "color: #c9a84c; font-size: 11px; font-weight: bold;"
+            " background: transparent;")
+        _tr_glow = QGraphicsDropShadowEffect()
+        _tr_glow.setColor(QColor(201, 168, 76, 160))
+        _tr_glow.setBlurRadius(12)
+        _tr_glow.setOffset(0, 0)
+        self._lbl_transposing.setGraphicsEffect(_tr_glow)
+        self._lbl_transposing.setVisible(False)
+        search_row.addWidget(self._lbl_transposing)
+
         self._lbl_logo = QLabel("somersaudio")
         self._lbl_logo.setStyleSheet("color: rgba(255, 255, 255, 80); font-size: 13px; font-weight: 600; background: transparent; letter-spacing: 1px;")
         search_row.addWidget(self._lbl_logo)
@@ -6183,6 +6199,13 @@ class SimplePage(QWidget):
         self._spinner_timer = QTimer()
         self._spinner_timer.setInterval(80)
         self._spinner_timer.timeout.connect(self._spin)
+        # Batch "transposing" indicator state (see _lbl_transposing).
+        self._transpose_frames = ["◐", "◓", "◑", "◒"]
+        self._transpose_idx = 0
+        self._transpose_count = (0, 0)  # (current file, total files)
+        self._transpose_timer = QTimer()
+        self._transpose_timer.setInterval(130)
+        self._transpose_timer.timeout.connect(self._spin_transposing)
         self._waveform = _WaveformWidget()
         self._waveform.sections_changed.connect(self._on_sections_changed)
         self._waveform.interacted.connect(lambda: setattr(self, '_active_waveform', self._waveform))
@@ -6971,6 +6994,7 @@ class SimplePage(QWidget):
         self._btn_optimize.setVisible(False)
         self._opt_container.setVisible(False)
         self._hide_spinner()
+        self._hide_transposing()
         # Drop the batch queue and restore the single-file view.
         self._convert_queue.clear()
         self._convert_queue.setVisible(False)
@@ -7050,6 +7074,36 @@ class SimplePage(QWidget):
         self._spinner_active = False
         self._spinner_label.setVisible(False)
         self._spinner_timer.stop()
+
+    def _spin_transposing(self):
+        self._transpose_idx = (
+            (self._transpose_idx + 1) % len(self._transpose_frames))
+        self._paint_transposing()
+
+    def _paint_transposing(self):
+        glyph = self._transpose_frames[self._transpose_idx]
+        cur, total = self._transpose_count
+        counter = f"   {cur}/{total}" if total > 1 else ""
+        self._lbl_transposing.setText(f"{glyph}  transposing{counter}")
+
+    def _show_transposing(self, cur, total):
+        """Show the top-right batch transpose indicator and start its
+        rotation. The generic 'converting' spinner is hidden so only one
+        indicator occupies the top-right at a time."""
+        self._hide_spinner()
+        self._transpose_count = (cur, total)
+        self._paint_transposing()
+        self._lbl_transposing.setVisible(True)
+        self._transpose_timer.start()
+
+    def _set_transposing(self, cur, total):
+        """Advance the file counter without restarting the rotation."""
+        self._transpose_count = (cur, total)
+        self._paint_transposing()
+
+    def _hide_transposing(self):
+        self._lbl_transposing.setVisible(False)
+        self._transpose_timer.stop()
 
     def _analyze_waveform(self):
         if not self._source_path or not os.path.exists(self._source_path):
@@ -7602,7 +7656,7 @@ class SimplePage(QWidget):
         self._convert_ring.set_update_mode(False)
         self._convert_ring.set_converting(True)
         self._convert_ring.set_progress(0.02)
-        self._show_spinner("converting")
+        self._show_transposing(1, len(self._batch_files))
         self._log.clear_log()
         self._log.append_line(
             f"Batch: converting {len(self._batch_files)} files "
@@ -7652,7 +7706,7 @@ class SimplePage(QWidget):
         self._convert_ring.set_update_mode(False)
         self._convert_ring.set_converting(True)
         self._convert_ring.set_progress(0.02)
-        self._show_spinner("converting")
+        self._show_transposing(1, 1)
         self._log.clear_log()
         self._log.append_line(f"Updating {os.path.basename(path)}")
         QTimer.singleShot(50, self._position_bottom_panel)
@@ -7678,6 +7732,7 @@ class SimplePage(QWidget):
             self._batch_finish()
             return
         path = self._batch_files[self._batch_index]
+        self._set_transposing(self._batch_index + 1, len(self._batch_files))
         self._convert_queue.set_status(path, "converting")
         self._convert_queue.set_header(
             f"Converting {self._batch_index + 1} of "
@@ -7825,6 +7880,7 @@ class SimplePage(QWidget):
         self._batch_running = False
         self._worker = None
         self._hide_spinner()
+        self._hide_transposing()
         self._convert_ring.set_progress(1.0)
         QTimer.singleShot(500, lambda: self._convert_ring.set_converting(False))
         # Summarise the whole queue — files done in earlier runs were
@@ -7864,6 +7920,7 @@ class SimplePage(QWidget):
             self._worker.wait(1000)
         self._worker = None
         self._hide_spinner()
+        self._hide_transposing()
         # Any file still mid-flight reverts to queued.
         for p in self._batch_files:
             row = self._convert_queue.row(p)
