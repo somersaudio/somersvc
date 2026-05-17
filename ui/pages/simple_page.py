@@ -4881,7 +4881,9 @@ class _CreateModelPanel(QWidget):
                     self.progress.emit(f"Isolating {i}/{total}: {name}")
                     try:
                         stems = sep.separate(p, self.out_dir, on_log=parse)
-                        vocals.append(stems["vocals"])
+                        # Pair the vocal with its source so _on_iso_done
+                        # can slot it back into the source's file group.
+                        vocals.append((p, stems["vocals"]))
                         self._download_phase = False
                     except Exception as e:
                         errors.append(f"{name}: {e}")
@@ -4970,50 +4972,88 @@ class _CreateModelPanel(QWidget):
         self._progress_bar.setVisible(False)
         self._isolating_timer.stop()
         self._lbl_isolating.setVisible(False)
-        # Rename Demucs's bare "vocals.wav" to "<song>_Isolated_Vocals.wav" so
-        # the filename carries the provenance — both for the badge in the file
-        # list AND survives the copy into dataset_dir during training.
-        renamed = []
-        for v in vocals:
+        # `vocals` is a list of (source_clip, demucs vocals.wav) pairs.
+        # Rename Demucs's bare "vocals.wav" to "<song>_Isolated_Vocals.wav"
+        # so the filename carries the provenance, then copy it out of the
+        # temp isolation dir to a stable home next to its source clip.
+        import shutil
+        pairs = []  # (source_clip, isolated_clip) — both stable paths
+        for src, v in vocals:
             try:
                 song_dir = os.path.dirname(v)
-                song_stem = os.path.basename(song_dir)  # "Ain't No Sunshine_spotdown.org"
-                tagged = os.path.join(song_dir, f"{song_stem}_Isolated_Vocals.wav")
-                if v != tagged:
+                song_stem = os.path.basename(song_dir)
+                tagged = os.path.join(
+                    song_dir, f"{song_stem}_Isolated_Vocals.wav")
+                if v != tagged and os.path.exists(v):
                     os.rename(v, tagged)
-                renamed.append(tagged)
+                dest = os.path.join(
+                    os.path.dirname(src), os.path.basename(tagged))
+                if os.path.abspath(dest) != os.path.abspath(tagged):
+                    shutil.copy2(tagged, dest)
+                pairs.append((src, dest))
             except Exception:
-                renamed.append(v)
-        # If the user opted to replace the pre-isolation sources, drop them
-        # from the clip list. We only remove ones that actually got an
-        # isolated counterpart — files that errored out stay so the user
-        # can still see them.
+                pairs.append((src, v))
         replace = getattr(self, "_iso_replace_originals", False)
-        sources = list(getattr(self, "_iso_source_paths", []))
-        if replace and renamed and sources:
-            ok_count = min(len(renamed), len(sources))  # in queue order
-            originals_to_drop = set(sources[:ok_count])
-            self._clips = [c for c in self._clips if c not in originals_to_drop]
         # Reset the per-run state
         self._iso_replace_originals = False
         self._iso_source_paths = []
 
-        if renamed:
-            self._add_clips(renamed)
-            self._lbl_status.setText(f"Isolated vocals from {len(renamed)} song(s).")
+        if pairs:
+            self._apply_isolated_clips(pairs, replace)
+            self._lbl_status.setText(
+                f"Isolated vocals from {len(pairs)} clip(s)."
+            )
             self._lbl_status.setStyleSheet(
-                "color: rgba(80, 200, 120, 150); font-size: 11px; background: transparent;"
+                "color: rgba(80, 200, 120, 150); font-size: 11px;"
+                " background: transparent;"
             )
         if errors:
             QMessageBox.warning(
                 self, "Vocal Isolation Failed",
                 "Some songs couldn't be processed:\n\n" + "\n".join(errors[:5]),
             )
-            if not vocals:
+            if not pairs:
                 self._lbl_status.setText("Vocal isolation failed — see error.")
                 self._lbl_status.setStyleSheet(
-                    "color: rgba(255, 100, 100, 150); font-size: 11px; background: transparent;"
+                    "color: rgba(255, 100, 100, 150); font-size: 11px;"
+                    " background: transparent;"
                 )
+
+    def _apply_isolated_clips(self, pairs, replace):
+        """Slot each isolated vocal into the same file group its source
+        clip belongs to, instead of spawning new top-level entries.
+
+        With `replace` on, the source clip is swapped for its isolated
+        version in place — the non-isolated clip drops out of the
+        folder; otherwise the isolated clip is added alongside it."""
+        for src, iso in pairs:
+            host_rec = None
+            clip_idx = -1
+            for rec in self._processed_files:
+                for idx, c in enumerate(rec.get("clips", [])):
+                    if c.get("path") == src:
+                        host_rec, clip_idx = rec, idx
+                        break
+                if host_rec is not None:
+                    break
+            if host_rec is not None:
+                entry = {"path": iso, "silent": False}
+                if replace:
+                    host_rec["clips"][clip_idx] = entry
+                else:
+                    host_rec["clips"].insert(clip_idx + 1, entry)
+            # Keep the flat clip list (what the trainer consumes) in step.
+            if replace and src in self._clips:
+                self._clips = [iso if c == src else c for c in self._clips]
+            elif iso not in self._clips:
+                pos = (self._clips.index(src) + 1
+                       if src in self._clips else len(self._clips))
+                self._clips.insert(pos, iso)
+        self._refresh_file_list()
+        # Persist for pending (untrained) artists so a reopen keeps it.
+        name = (self._selected_name or "").strip()
+        if name and not os.path.isdir(os.path.join(str(DATASETS_DIR), name)):
+            self._pending_clips_by_artist[name] = list(self._clips)
 
     def _start_training(self, resume=False):
         name = self._selected_name.strip()
