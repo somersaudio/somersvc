@@ -5565,6 +5565,61 @@ class _OptimizeButton(QPushButton):
         p.end()
 
 
+class _ShimmerText(QWidget):
+    """A centred line of text carrying the same slow left-to-right
+    shimmer as the 'Optimal' button. Stands in for the batch waveform
+    while a focused file's key analysis runs."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._text = text
+        self._phase = 0.0  # 0..1 sweep position
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)  # ~30 fps
+        self._timer.timeout.connect(self._advance)
+
+    def setText(self, text):
+        self._text = text
+        self.update()
+
+    def _advance(self):
+        self._phase = (self._phase + 0.016) % 1.0
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        # A bright band sweeps a dim base, entering off-left, exiting
+        # off-right — matches _OptimizeButton's 'Optimal' shimmer.
+        base = QColor(120, 120, 120)
+        shine = QColor(240, 240, 240)
+        band = 0.22
+        center = self._phase * (1.0 + 2 * band) - band
+        grad = QLinearGradient(0, 0, self.width(), 0)
+        for stop, col in (
+            (0.0, base),
+            (center - band, base),
+            (center, shine),
+            (center + band, base),
+            (1.0, base),
+        ):
+            grad.setColorAt(min(1.0, max(0.0, stop)), col)
+        p.setPen(QPen(QBrush(grad), 1))
+        p.setFont(self.font())
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
+        p.end()
+
+
 class _ConvertQueueRow(QWidget):
     """One file row in the batch-convert queue list.
 
@@ -6323,6 +6378,20 @@ class SimplePage(QWidget):
             lambda: setattr(self, '_active_waveform', self._batch_waveform))
         layout.addWidget(self._batch_waveform)
 
+        # Shown in the waveform's place while a focused batch file's key
+        # analysis runs — _load_batch_waveform swaps it for the real
+        # waveform the moment the analysis lands.
+        self._batch_wave_placeholder = _ShimmerText(
+            "matching artist and file keys...")
+        self._batch_wave_placeholder.setFixedHeight(
+            _WaveformWidget.WAVE_H + _WaveformWidget.TIME_H
+            + _WaveformWidget.MARGIN_Y * 2)
+        _ph_font = self._batch_wave_placeholder.font()
+        _ph_font.setPointSize(12)
+        self._batch_wave_placeholder.setFont(_ph_font)
+        self._batch_wave_placeholder.setVisible(False)
+        layout.addWidget(self._batch_wave_placeholder)
+
         # Output (converted) waveform sits in the MAIN layout right under
         # the Convert button so the result appears close to where the user
         # was just looking, instead of pinned to the window bottom inside
@@ -7021,6 +7090,8 @@ class SimplePage(QWidget):
         self._focused_batch_path = ""
         if getattr(self, "_batch_waveform", None) is not None:
             self._batch_waveform.setVisible(False)
+        if getattr(self, "_batch_wave_placeholder", None) is not None:
+            self._batch_wave_placeholder.setVisible(False)
         self._source_median_hz = 0
         self._section_cache = {}
         # Clean up section cache files
@@ -7219,20 +7290,27 @@ class SimplePage(QWidget):
     def _focus_batch_file(self, path):
         """A queued batch row was clicked — show that file's waveform below
         the Convert button. If its background analysis is still running,
-        _on_batch_wave_ready loads it the moment it lands."""
+        show the shimmer placeholder; _on_batch_wave_ready swaps in the
+        waveform the moment it lands."""
         self._focused_batch_path = path
         if path in self._batch_wave_state:
             self._load_batch_waveform(path)
+        else:
+            # Analysis still running — shimmer placeholder stands in.
+            self._batch_waveform.setVisible(False)
+            self._batch_wave_placeholder.setVisible(True)
         # The "Update" button tracks the focused file: lit only when this
         # file's waveform was edited after it was already converted.
         if not self._batch_running:
             self._convert_ring.set_update_mode(path in self._batch_wave_dirty)
 
     def _load_batch_waveform(self, path):
-        """Load a batch file's cached waveform state into the editor."""
+        """Load a batch file's cached waveform state into the editor,
+        replacing the shimmer placeholder."""
         st = self._batch_wave_state.get(path)
         if not st:
             return
+        self._batch_wave_placeholder.setVisible(False)
         self._batch_waveform.set_data(
             st["samples"], st["sections"], st["transposes"],
             st["median_hz"], self._model_center_hz)
@@ -8381,6 +8459,7 @@ class SimplePage(QWidget):
             if path == self._focused_batch_path:
                 self._focused_batch_path = ""
                 self._batch_waveform.setVisible(False)
+                self._batch_wave_placeholder.setVisible(False)
             # The × only shows on still-queued rows, so a removal
             # mid-batch is always a not-yet-converted file — safe to
             # pull from the live run without disturbing the index.
@@ -8402,6 +8481,7 @@ class SimplePage(QWidget):
             self._convert_queue.setVisible(False)
             self._convert_queue.clear()
             self._batch_waveform.setVisible(False)
+            self._batch_wave_placeholder.setVisible(False)
             self._focused_batch_path = ""
             # Leaving batch mode — a pending batch "Update" must not
             # leak into the single-file convert button.
