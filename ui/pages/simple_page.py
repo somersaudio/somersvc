@@ -20,6 +20,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QStyledItemDelegate,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -1819,28 +1821,33 @@ class _CreateModelPanel(QWidget):
         layout.addWidget(step2)
 
         # File list showing existing clips
-        self._file_list = QListWidget()
+        # A QTreeWidget (kept flat for now — step 2c groups clips under
+        # their uploaded file). Items carry their clip path in UserRole.
+        self._file_list = QTreeWidget()
+        self._file_list.setHeaderHidden(True)
+        self._file_list.setColumnCount(1)
+        self._file_list.setRootIsDecorated(False)
         # Custom delegate paints an "ISOLATED" badge in vintage gold on the
         # right side of any clip whose basename contains "_isolated".
         self._file_list.setItemDelegate(_ClipBadgeDelegate(self._file_list))
         self._file_list.setFixedHeight(200)
         # Allow shift-click / cmd-click / Cmd+A multi-select for bulk actions
         self._file_list.setSelectionMode(
-            QListWidget.SelectionMode.ExtendedSelection
+            QTreeWidget.SelectionMode.ExtendedSelection
         )
         self._file_list.setStyleSheet("""
-            QListWidget {
+            QTreeWidget {
                 background: rgba(255, 255, 255, 3);
                 border: 1px solid rgba(255, 255, 255, 10);
                 border-radius: 10px;
                 color: #999;
                 font-size: 11px;
             }
-            QListWidget::item {
+            QTreeWidget::item {
                 padding: 3px 8px;
                 border-bottom: 1px solid rgba(255, 255, 255, 5);
             }
-            QListWidget::item:selected {
+            QTreeWidget::item:selected {
                 background: rgba(255, 255, 255, 8);
                 color: #ccc;
             }
@@ -1932,7 +1939,7 @@ class _CreateModelPanel(QWidget):
         self._clip_waveform.setVisible(False)
         layout.addWidget(self._clip_waveform)
 
-        self._file_list.currentRowChanged.connect(self._on_clip_selected)
+        self._file_list.currentItemChanged.connect(self._on_clip_selected)
         self._file_list.itemSelectionChanged.connect(self._on_clip_selection_changed)
 
         layout.addSpacing(4)
@@ -2458,36 +2465,34 @@ class _CreateModelPanel(QWidget):
 
         try:
             import soundfile as _sf
-            total_dur = 0
-            for p in self._clips:
-                fname = os.path.basename(p)
+        except Exception:
+            _sf = None
+        total_dur = 0.0
+        for p in self._clips:
+            fname = os.path.basename(p)
+            text = fname
+            if _sf is not None:
                 try:
-                    info = _sf.info(p)
-                    dur = info.duration
+                    dur = _sf.info(p).duration
                     total_dur += dur
                     mins, secs = divmod(int(dur), 60)
-                    item = QListWidgetItem(f"{fname}  ({mins}:{secs:02d})")
+                    text = f"{fname}  ({mins}:{secs:02d})"
                 except Exception:
-                    item = QListWidgetItem(fname)
-                item.setBackground(_classify(p))
-                self._file_list.addItem(item)
-            total = len(self._clips)
-            mins, secs = divmod(int(total_dur), 60)
-            self._lbl_clips.setText(f"{total} clips  ·  {mins}:{secs:02d} total")
-        except Exception:
-            for p in self._clips:
-                item = QListWidgetItem(os.path.basename(p))
-                item.setBackground(_classify(p))
-                self._file_list.addItem(item)
-            self._lbl_clips.setText(f"{len(self._clips)} clips added")
+                    pass
+            item = QTreeWidgetItem([text])
+            # The clip's path travels with the row so actions and the
+            # waveform preview never depend on its position.
+            item.setData(0, Qt.ItemDataRole.UserRole, p)
+            item.setBackground(0, _classify(p))
+            self._file_list.addTopLevelItem(item)
+        total = len(self._clips)
+        mins, secs = divmod(int(total_dur), 60)
+        self._lbl_clips.setText(f"{total} clips  ·  {mins}:{secs:02d} total")
 
-    def _on_clip_selected(self, row):
-        """Load waveform for the selected clip."""
-        if row < 0 or row >= len(self._clips):
-            self._clip_waveform.setVisible(False)
-            return
-        path = self._clips[row]
-        if not os.path.exists(path):
+    def _on_clip_selected(self, current, previous=None):
+        """Load the waveform for the selected clip row."""
+        path = current.data(0, Qt.ItemDataRole.UserRole) if current else None
+        if not path or not os.path.exists(path):
             self._clip_waveform.setVisible(False)
             return
         # Load samples in background
@@ -2688,16 +2693,17 @@ class _CreateModelPanel(QWidget):
         Keeping clip actions path-based (not row-index based) lets the
         list widget change underneath without touching them.
         """
-        rows = sorted({
-            self._file_list.row(it)
-            for it in self._file_list.selectedItems()
-        })
-        rows = [r for r in rows if 0 <= r < len(self._clips)]
-        if not rows:
-            cur = self._file_list.currentRow()
-            if 0 <= cur < len(self._clips):
-                rows = [cur]
-        return [self._clips[r] for r in rows]
+        items = self._file_list.selectedItems()
+        if not items:
+            cur = self._file_list.currentItem()
+            if cur is not None:
+                items = [cur]
+        paths = []
+        for it in items:
+            p = it.data(0, Qt.ItemDataRole.UserRole)
+            if p and p not in paths:
+                paths.append(p)
+        return paths
 
     def _split_selected_clip(self):
         """Split each selected clip into ~7s chunks (clips ≤ 10s are skipped)."""
