@@ -3428,9 +3428,7 @@ class _CreateModelPanel(QWidget):
         else:
             tier = cfg.get("preferred_gpu_tier", "cheapest")
             params = self._TIER_TIMING.get(tier, self._TIER_TIMING["cheapest"])
-            self._lbl_gpu.setText(
-                f"Cloud GPU:  {params['label']}   ·   {tier.capitalize()}"
-            )
+            self._lbl_gpu.setText(f"GPU - {params['label']}")
 
     def showEvent(self, event):
         super().showEvent(event)
