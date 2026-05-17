@@ -1721,6 +1721,11 @@ class _CreateModelPanel(QWidget):
         self._selected_name = ""
         self._training = False
         self._worker = None
+        # GPU-availability status for the label above Start Training — set
+        # while a cloud run provisions if the chosen GPU is unavailable.
+        self._gpu_chosen_unavail = False
+        self._gpu_active = None
+        self._gpu_got = False
         # Initialise training-progress fields so a reattach via ResumeWorker
         # can read them in _on_train_log without an AttributeError fatal.
         self._recommended_epochs = 0
@@ -3504,8 +3509,31 @@ class _CreateModelPanel(QWidget):
         except Exception:
             return "cheapest"
 
+    # RunPod GPU type names -> short labels for the GPU status line.
+    _GPU_SHORT = {
+        "NVIDIA A40": "A40",
+        "NVIDIA RTX A6000": "RTX A6000",
+        "NVIDIA RTX 6000 Ada Generation": "RTX 6000 Ada",
+        "NVIDIA A100 80GB PCIe": "A100",
+        "NVIDIA A100-SXM4-80GB": "A100 SXM",
+        "NVIDIA H100 80GB HBM3": "H100",
+    }
+
+    def _short_gpu(self, full: str) -> str:
+        """Shorten a RunPod GPU type name for the status line."""
+        full = (full or "").strip()
+        if full in self._GPU_SHORT:
+            return self._GPU_SHORT[full]
+        # Unknown name — drop the vendor prefix and any memory suffix.
+        s = full.replace("NVIDIA ", "").strip()
+        for cut in (" 80GB", " 48GB", " 24GB"):
+            s = s.split(cut)[0]
+        return s.strip() or full
+
     def _refresh_gpu_label(self):
-        """Reflect the Settings GPU choice in the label above Train."""
+        """GPU label above Start Training. Reflects the Settings choice; while
+        a cloud run provisions, shows when the chosen GPU is unavailable and
+        which GPU is being tried/used instead."""
         try:
             from services.job_store import load_config
             cfg = load_config() or {}
@@ -3513,10 +3541,50 @@ class _CreateModelPanel(QWidget):
             cfg = {}
         if cfg.get("train_locally"):
             self._lbl_gpu.setText("Training on this computer")
+            return
+        tier = cfg.get("preferred_gpu_tier", "cheapest")
+        params = self._TIER_TIMING.get(tier, self._TIER_TIMING["cheapest"])
+        chosen = params["label"]
+        if getattr(self, "_gpu_chosen_unavail", False):
+            active = getattr(self, "_gpu_active", None)
+            if getattr(self, "_gpu_got", False) and active:
+                second = f"using {active}"
+            elif active:
+                second = f"trying {active}…"
+            else:
+                second = "finding a GPU…"
+            # Chosen GPU pinned on top with "unavailable"; the GPU actually
+            # being tried / now in use sits on the line beneath it.
+            self._lbl_gpu.setText(
+                f'GPU - {chosen} '
+                f'<span style="color:#e0a040;">· unavailable</span>'
+                f'<br><span style="color:#9a9a9a;">{second}</span>'
+            )
         else:
-            tier = cfg.get("preferred_gpu_tier", "cheapest")
-            params = self._TIER_TIMING.get(tier, self._TIER_TIMING["cheapest"])
-            self._lbl_gpu.setText(f"GPU - {params['label']}")
+            self._lbl_gpu.setText(f"GPU - {chosen}")
+
+    def _parse_gpu_provisioning(self, line: str):
+        """Watch the cloud-provisioning log lines (emitted by RunPodClient's
+        GPU-fallback chain) so the GPU label can show, live, when the chosen
+        GPU is unavailable and which GPU is being tried/used instead."""
+        import re
+        s = line.strip()
+        m = re.match(r'^Trying (.+?)\.\.\.\s*$', s)
+        if m:
+            self._gpu_active = self._short_gpu(m.group(1))
+            self._refresh_gpu_label()
+            return
+        if re.match(r'^.+ unavailable, trying next', s):
+            self._gpu_chosen_unavail = True
+            self._gpu_active = None
+            self._refresh_gpu_label()
+            return
+        m = re.match(r'^Got (.+?)!\s*$', s)
+        if m:
+            self._gpu_active = self._short_gpu(m.group(1))
+            self._gpu_got = True
+            self._refresh_gpu_label()
+            return
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -4935,6 +5003,13 @@ class _CreateModelPanel(QWidget):
             self._worker.status_changed.connect(lambda s: self._lbl_status.setText(s))
             self._worker.progress.connect(self._progress_bar.setValue)
 
+            # New run — clear any GPU-availability status from a prior run so
+            # the label starts at the plain "GPU - <chosen>".
+            self._gpu_chosen_unavail = False
+            self._gpu_active = None
+            self._gpu_got = False
+            self._refresh_gpu_label()
+
             # Calculate recommended epochs
             self._recommended_epochs = 2000
             # When resuming, we know the current checkpoint epoch — used to
@@ -5181,6 +5256,8 @@ class _CreateModelPanel(QWidget):
         display = self._format_log_line_for_display(line)
         if display is not None:
             self._log.append_line(display)
+        # Cloud GPU provisioning status -> the label above Start Training.
+        self._parse_gpu_provisioning(line)
         import re
         epoch = None
         # ResumeWorker polling line: "Training in progress... latest checkpoint: G_25.pth"
