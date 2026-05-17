@@ -1822,12 +1822,14 @@ class _CreateModelPanel(QWidget):
         layout.addWidget(step2)
 
         # File list showing existing clips
-        # A QTreeWidget (kept flat for now — step 2c groups clips under
-        # their uploaded file). Items carry their clip path in UserRole.
+        # A QTreeWidget — uploaded files are top-level nodes, their
+        # split clips are expandable children. Each item carries a path
+        # in UserRole (the clip path for clip rows, the original upload
+        # for a file node).
         self._file_list = QTreeWidget()
         self._file_list.setHeaderHidden(True)
         self._file_list.setColumnCount(1)
-        self._file_list.setRootIsDecorated(False)
+        self._file_list.setRootIsDecorated(True)
         # Custom delegate paints an "ISOLATED" badge in vintage gold on the
         # right side of any clip whose basename contains "_isolated".
         self._file_list.setItemDelegate(_ClipBadgeDelegate(self._file_list))
@@ -2468,24 +2470,57 @@ class _CreateModelPanel(QWidget):
             import soundfile as _sf
         except Exception:
             _sf = None
-        total_dur = 0.0
-        for p in self._clips:
-            fname = os.path.basename(p)
+
+        def _clip_item(path):
+            """Build a leaf row for one clip — returns (item, duration).
+            The clip's path travels in UserRole so actions and the
+            waveform preview never depend on its position."""
+            fname = os.path.basename(path)
             text = fname
+            dur = 0.0
             if _sf is not None:
                 try:
-                    dur = _sf.info(p).duration
-                    total_dur += dur
+                    dur = _sf.info(path).duration
                     mins, secs = divmod(int(dur), 60)
                     text = f"{fname}  ({mins}:{secs:02d})"
                 except Exception:
                     pass
-            item = QTreeWidgetItem([text])
-            # The clip's path travels with the row so actions and the
-            # waveform preview never depend on its position.
-            item.setData(0, Qt.ItemDataRole.UserRole, p)
-            item.setBackground(0, _classify(p))
+            it = QTreeWidgetItem([text])
+            it.setData(0, Qt.ItemDataRole.UserRole, path)
+            it.setBackground(0, _classify(path))
+            return it, dur
+
+        clips_set = set(self._clips)
+        total_dur = 0.0
+        grouped = set()
+
+        # Files uploaded this session — grouped, with their split clips
+        # as expandable children (records whose clips are all gone are
+        # skipped, so it stays in step with self._clips).
+        for rec in self._processed_files:
+            rec_clips = [c["path"] for c in rec.get("clips", [])
+                         if c["path"] in clips_set]
+            if not rec_clips:
+                continue
+            file_node = QTreeWidgetItem([rec.get("name", "Audio file")])
+            # Selecting the file node previews the original upload.
+            file_node.setData(0, Qt.ItemDataRole.UserRole, rec.get("source"))
+            self._file_list.addTopLevelItem(file_node)
+            for cp in rec_clips:
+                child, dur = _clip_item(cp)
+                file_node.addChild(child)
+                total_dur += dur
+                grouped.add(cp)
+
+        # Clips that didn't come through the auto-processor (e.g. an
+        # existing artist's dataset) stay as flat top-level rows.
+        for p in self._clips:
+            if p in grouped:
+                continue
+            item, dur = _clip_item(p)
             self._file_list.addTopLevelItem(item)
+            total_dur += dur
+
         total = len(self._clips)
         mins, secs = divmod(int(total_dur), 60)
         self._lbl_clips.setText(f"{total} clips  ·  {mins}:{secs:02d} total")
@@ -2701,9 +2736,16 @@ class _CreateModelPanel(QWidget):
                 items = [cur]
         paths = []
         for it in items:
-            p = it.data(0, Qt.ItemDataRole.UserRole)
-            if p and p not in paths:
-                paths.append(p)
+            if it.childCount() > 0:
+                # A file node — resolve to all its clip children.
+                for i in range(it.childCount()):
+                    p = it.child(i).data(0, Qt.ItemDataRole.UserRole)
+                    if p and p not in paths:
+                        paths.append(p)
+            else:
+                p = it.data(0, Qt.ItemDataRole.UserRole)
+                if p and p not in paths:
+                    paths.append(p)
         return paths
 
     def _split_selected_clip(self):
