@@ -2996,7 +2996,10 @@ class _CreateModelPanel(QWidget):
             chk_label = "Include training data (none on disk)"
         chk = QCheckBox(chk_label)
         chk.setEnabled(bool(dataset_files))
-        chk.setChecked(False)
+        # Default ON when a dataset exists — an export without its
+        # training data can't be retrained or extended on the other
+        # machine, and recipients expect the data to come along.
+        chk.setChecked(bool(dataset_files))
         chk.setStyleSheet("color: #ccc; font-size: 12px;")
         v.addWidget(chk)
 
