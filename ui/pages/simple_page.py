@@ -1782,6 +1782,15 @@ class _CreateModelPanel(QWidget):
         title.setStyleSheet("color: #ddd; font-size: 18px; font-weight: bold; background: transparent;")
         header.addWidget(title)
         header.addStretch()
+        # Yellow "isolating" indicator — shown top-right only while a
+        # vocal-isolation run is in progress (see _isolate_vocals).
+        self._lbl_isolating = QLabel("isolating")
+        self._lbl_isolating.setStyleSheet(
+            "color: #c9a84c; font-size: 11px; font-weight: bold;"
+            " background: transparent; padding: 0 6px;"
+        )
+        self._lbl_isolating.setVisible(False)
+        header.addWidget(self._lbl_isolating)
         # Import + Export icon buttons (top-right)
         icon_style = (
             "QLabel { color: rgba(255,255,255,55); font-size: 18px; "
@@ -4845,23 +4854,15 @@ class _CreateModelPanel(QWidget):
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
         self._lbl_epoch.setVisible(False)
-
-        def _on_progress(msg: str):
-            self._lbl_status.setText(msg[:120])
-            self._lbl_status.setStyleSheet(
-                "color: rgba(255, 255, 255, 75); font-size: 11px; background: transparent;"
-            )
+        # Show the yellow "isolating" indicator top-right instead of
+        # pumping the variable-width separator log into the status line.
+        self._lbl_status.setText("")
+        self._lbl_isolating.setVisible(True)
 
         def _on_queue(done: int, total: int, name: str):
+            # Just advance the progress bar — the top-right "isolating"
+            # indicator stands in for the old per-line status log.
             self._progress_bar.setValue(done)
-            remaining = total - done
-            if remaining > 0:
-                self._lbl_status.setText(
-                    f"Isolating {done + 1}/{total}: {name}"
-                    f"  ·  {remaining} song{'s' if remaining != 1 else ''} left"
-                )
-            else:
-                self._lbl_status.setText(f"Isolated {total} song{'s' if total != 1 else ''}.")
 
         def _on_dl_pct(pct: int):
             if dl_bar is not None:
@@ -4872,7 +4873,6 @@ class _CreateModelPanel(QWidget):
             if dl_dialog is not None and p == "separating":
                 dl_dialog.accept()
 
-        self._iso_worker.progress.connect(_on_progress)
         self._iso_worker.queue_progress.connect(_on_queue)
         self._iso_worker.download_pct.connect(_on_dl_pct)
         self._iso_worker.phase.connect(_on_phase)
@@ -4885,8 +4885,10 @@ class _CreateModelPanel(QWidget):
             dl_dialog.exec()
 
     def _on_iso_done(self, vocals, errors):
-        # Drop the queue progress bar now that we're done.
+        # Drop the queue progress bar + the "isolating" indicator now that
+        # we're done.
         self._progress_bar.setVisible(False)
+        self._lbl_isolating.setVisible(False)
         # Rename Demucs's bare "vocals.wav" to "<song>_Isolated_Vocals.wav" so
         # the filename carries the provenance — both for the badge in the file
         # list AND survives the copy into dataset_dir during training.
