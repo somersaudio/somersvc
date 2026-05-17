@@ -177,8 +177,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SomerSVC',
         'CFBundleDisplayName': 'SomerSVC',
-        'CFBundleShortVersionString': '1.0.47',
-        'CFBundleVersion': '1.0.47',
+        'CFBundleShortVersionString': '1.0.48',
+        'CFBundleVersion': '1.0.48',
         'NSHighResolutionCapable': 'True',
         'NSMicrophoneUsageDescription': 'SomerSVC needs microphone access for realtime voice conversion.',
         'NSAppleEventsUsageDescription': 'SomerSVC uses Apple Events for output folder access.',
