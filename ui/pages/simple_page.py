@@ -2498,18 +2498,21 @@ class _CreateModelPanel(QWidget):
         """Reconstruct the file → clips grouping from clip filenames.
 
         The auto-processor names split clips '<source-stem>_partNN.wav'
-        (older datasets use '<stem>_clipNNN.wav'). On an app restart or
-        artist switch the panel only has a flat clip list — regroup by
-        that shared stem so the expandable file → clips tree shows again
-        instead of a bare flat list. Clips whose names don't match the
-        split pattern are left ungrouped (they render as flat rows).
+        (older datasets use '<stem>_clipNNN.wav'); an isolated clip adds
+        an '_Isolated_Vocals' suffix. On an app restart or artist switch
+        the panel only has a flat clip list — regroup by that shared
+        stem so the expandable file → clips tree shows again instead of
+        a bare flat list, and so isolated clips land back in their
+        track's folder. Clips whose names don't match the split pattern
+        are left ungrouped (they render as flat rows).
         """
         import re
         groups: dict = {}
         order: list = []
         for p in self._clips:
             base = os.path.splitext(os.path.basename(p))[0]
-            m = re.match(r'^(.+)_(?:part|clip)\d+$', base)
+            m = re.match(
+                r'^(.+)_(?:part|clip)\d+(?:_Isolated_Vocals)?$', base)
             if not m:
                 continue  # not a split clip — _refresh_file_list shows it flat
             stem = m.group(1)
@@ -4794,7 +4797,7 @@ class _CreateModelPanel(QWidget):
         more = f"\n  ...and {n - 5} more" if n > 5 else ""
         from PyQt6.QtCore import Qt as _Qt
         from PyQt6.QtWidgets import (
-            QDialog, QLabel, QCheckBox, QDialogButtonBox, QVBoxLayout,
+            QDialog, QLabel, QDialogButtonBox, QVBoxLayout,
         )
         dlg = QDialog(self)
         dlg.setWindowTitle("Isolate Vocals")
@@ -4806,17 +4809,13 @@ class _CreateModelPanel(QWidget):
         msg = QLabel(
             f"Isolate vocals from {n} song{'s' if n != 1 else ''}?\n\n"
             f"{sample}{more}\n\n"
+            f"Each clip is replaced by its isolated vocal — the "
+            f"non-isolated version is removed.\n"
             f"Each song takes ~30-90 seconds depending on length."
         )
         msg.setStyleSheet("color: #ddd; font-size: 12px;")
         msg.setWordWrap(True)
         v.addWidget(msg)
-        chk_replace = QCheckBox(
-            f"Remove original {'song' if n == 1 else 'songs'} after isolation"
-        )
-        chk_replace.setChecked(True)  # default: keep only the isolated vocals
-        chk_replace.setStyleSheet("color: #ccc; font-size: 12px;")
-        v.addWidget(chk_replace)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -4826,10 +4825,6 @@ class _CreateModelPanel(QWidget):
         v.addWidget(buttons)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        # Stash the per-source-path replacement preference so _on_iso_done
-        # can act on it after the worker finishes.
-        self._iso_replace_originals = chk_replace.isChecked()
-        self._iso_source_paths = list(paths)
 
         first_run = not self._demucs_model_present()
         if first_run:
@@ -4996,13 +4991,8 @@ class _CreateModelPanel(QWidget):
                 pairs.append((src, dest))
             except Exception:
                 pairs.append((src, v))
-        replace = getattr(self, "_iso_replace_originals", False)
-        # Reset the per-run state
-        self._iso_replace_originals = False
-        self._iso_source_paths = []
-
         if pairs:
-            self._apply_isolated_clips(pairs, replace)
+            self._apply_isolated_clips(pairs)
             self._lbl_status.setText(
                 f"Isolated vocals from {len(pairs)} clip(s)."
             )
@@ -5022,36 +5012,41 @@ class _CreateModelPanel(QWidget):
                     " background: transparent;"
                 )
 
-    def _apply_isolated_clips(self, pairs, replace):
-        """Slot each isolated vocal into the same file group its source
-        clip belongs to, instead of spawning new top-level entries.
+    def _apply_isolated_clips(self, pairs):
+        """Replace each source clip with its isolated vocal, in place,
+        inside the file group it belongs to — no new top-level entries,
+        no non-isolated leftovers.
 
-        With `replace` on, the source clip is swapped for its isolated
-        version in place — the non-isolated clip drops out of the
-        folder; otherwise the isolated clip is added alongside it."""
+        The non-isolated original is deleted from disk too: without that
+        it reappears whenever the clip list is rebuilt from disk (artist
+        switch, app restart, post-training refresh)."""
+        safe_roots = [os.path.abspath(str(CACHE_DIR)),
+                      os.path.abspath(str(DATASETS_DIR))]
         for src, iso in pairs:
-            host_rec = None
-            clip_idx = -1
+            # Swap the entry inside whichever file group owns it.
             for rec in self._processed_files:
-                for idx, c in enumerate(rec.get("clips", [])):
-                    if c.get("path") == src:
-                        host_rec, clip_idx = rec, idx
-                        break
-                if host_rec is not None:
+                clips = rec.get("clips", [])
+                hit = next((i for i, c in enumerate(clips)
+                            if c.get("path") == src), -1)
+                if hit >= 0:
+                    clips[hit] = {"path": iso, "silent": False}
                     break
-            if host_rec is not None:
-                entry = {"path": iso, "silent": False}
-                if replace:
-                    host_rec["clips"][clip_idx] = entry
-                else:
-                    host_rec["clips"].insert(clip_idx + 1, entry)
             # Keep the flat clip list (what the trainer consumes) in step.
-            if replace and src in self._clips:
+            if src in self._clips:
                 self._clips = [iso if c == src else c for c in self._clips]
             elif iso not in self._clips:
-                pos = (self._clips.index(src) + 1
-                       if src in self._clips else len(self._clips))
-                self._clips.insert(pos, iso)
+                self._clips.append(iso)
+            # Drop the non-isolated original from disk so it can't come
+            # back on the next rebuild. Only ever an app-managed clip
+            # (a split part or a dataset clip) — never the user's upload.
+            abs_src = os.path.abspath(src)
+            if (abs_src != os.path.abspath(iso) and os.path.exists(iso)
+                    and any(abs_src.startswith(r + os.sep)
+                            for r in safe_roots)):
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
         self._refresh_file_list()
         # Persist for pending (untrained) artists so a reopen keeps it.
         name = (self._selected_name or "").strip()
