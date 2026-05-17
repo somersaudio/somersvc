@@ -1744,7 +1744,28 @@ class _CreateModelPanel(QWidget):
         self._pending_clips_by_artist: dict = {}
         self.setAcceptDrops(True)
 
-        layout = QVBoxLayout(self)
+        # The panel's content is taller than the window can get once a clip
+        # waveform is showing — an over-constrained QVBoxLayout was
+        # overlapping widgets (clip list over the action buttons). Put
+        # everything in a scroll area so it scrolls instead. Kept
+        # transparent so the artist-photo background (drawn in paintEvent)
+        # still shows through.
+        from PyQt6.QtWidgets import QScrollArea, QFrame, QWidget
+        _outer = QVBoxLayout(self)
+        _outer.setContentsMargins(0, 0, 0, 0)
+        _scroll = QScrollArea()
+        _scroll.setWidgetResizable(True)
+        _scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        _scroll.viewport().setStyleSheet("background: transparent;")
+        _content = QWidget()
+        _content.setStyleSheet("background: transparent;")
+        _scroll.setWidget(_content)
+        _outer.addWidget(_scroll)
+
+        layout = QVBoxLayout(_content)
         layout.setContentsMargins(30, 20, 30, 20)
         layout.setSpacing(12)
 
