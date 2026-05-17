@@ -5575,6 +5575,7 @@ class _ConvertQueueRow(QWidget):
     """
     remove_requested = pyqtSignal(str)  # emits this row's path
     play_requested = pyqtSignal(str)    # emits this row's path (▶ click)
+    clicked = pyqtSignal(str)           # emits this row's path (row body click)
 
     # status -> (dot glyph, text colour, dot colour)
     _STATUS = {
@@ -5656,6 +5657,12 @@ class _ConvertQueueRow(QWidget):
 
         self.set_status("queued")
 
+    def mousePressEvent(self, event):
+        # Clicking the row body (not the ▶/× buttons — they handle their
+        # own clicks) focuses this file's waveform in batch mode.
+        self.clicked.emit(self.path)
+        super().mousePressEvent(event)
+
     def set_status(self, status: str):
         self.status = status
         glyph, text_color, dot_color = self._STATUS.get(
@@ -5723,6 +5730,7 @@ class _ConvertQueueList(QWidget):
     live N-of-M header. Shown in place of the waveform editor when
     2+ files are loaded."""
     remove_requested = pyqtSignal(str)
+    row_clicked = pyqtSignal(str)  # a row body was clicked — emits its path
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -5841,6 +5849,7 @@ class _ConvertQueueList(QWidget):
                     row.set_sections(secs)
             row.remove_requested.connect(self.remove_requested)
             row.play_requested.connect(self._on_row_play)
+            row.clicked.connect(self.row_clicked)
             self._list_layout.insertWidget(
                 self._list_layout.count() - 1, row
             )
@@ -5894,6 +5903,7 @@ class SimplePage(QWidget):
         # in-flight analyzer threads so they aren't GC'd while running.
         self._batch_wave_state = {}
         self._batch_wave_workers = {}
+        self._focused_batch_path = ""  # batch file whose waveform is shown
         self._section_cache = {}
         self._selected_model_idx = -1
         self._optimized_for_model = -1  # model idx the waveform was last optimized for
@@ -6180,6 +6190,7 @@ class SimplePage(QWidget):
         # files are loaded. Hidden in the single-file flow.
         self._convert_queue = _ConvertQueueList()
         self._convert_queue.remove_requested.connect(self._remove_source)
+        self._convert_queue.row_clicked.connect(self._focus_batch_file)
         self._convert_queue.setVisible(False)
         layout.addWidget(self._convert_queue)
 
@@ -6234,6 +6245,16 @@ class SimplePage(QWidget):
         self._progress_value = 0.0
         self._total_chunks = 1
         self._chunks_done = 0
+
+        # Batch mode: per-file waveform editor shown below the Convert
+        # button when a queued file's row is clicked. Single-file mode is
+        # untouched — it keeps using self._waveform above the button.
+        self._batch_waveform = _WaveformWidget()
+        self._batch_waveform.setVisible(False)
+        self._batch_waveform.sections_changed.connect(self._on_batch_wave_edited)
+        self._batch_waveform.interacted.connect(
+            lambda: setattr(self, '_active_waveform', self._batch_waveform))
+        layout.addWidget(self._batch_waveform)
 
         # Output (converted) waveform sits in the MAIN layout right under
         # the Convert button so the result appears close to where the user
@@ -6929,6 +6950,9 @@ class SimplePage(QWidget):
         self._original_source = ""
         self._source_paths = []
         self._batch_wave_state.clear()
+        self._focused_batch_path = ""
+        if getattr(self, "_batch_waveform", None) is not None:
+            self._batch_waveform.setVisible(False)
         self._source_median_hz = 0
         self._section_cache = {}
         # Clean up section cache files
@@ -7089,6 +7113,37 @@ class SimplePage(QWidget):
                 "transposes": transposes,
                 "median_hz": median_hz,
             }
+            # If the user already clicked this file, show it now.
+            if path == self._focused_batch_path:
+                self._load_batch_waveform(path)
+
+    def _focus_batch_file(self, path):
+        """A queued batch row was clicked — show that file's waveform below
+        the Convert button. If its background analysis is still running,
+        _on_batch_wave_ready loads it the moment it lands."""
+        self._focused_batch_path = path
+        if path in self._batch_wave_state:
+            self._load_batch_waveform(path)
+
+    def _load_batch_waveform(self, path):
+        """Load a batch file's cached waveform state into the editor."""
+        st = self._batch_wave_state.get(path)
+        if not st:
+            return
+        self._batch_waveform.set_data(
+            st["samples"], st["sections"], st["transposes"],
+            st["median_hz"], self._model_center_hz)
+        self._batch_waveform.setVisible(True)
+
+    def _on_batch_wave_edited(self):
+        """The focused batch file's waveform was edited — persist its
+        sections/transposes back to that file's state."""
+        path = self._focused_batch_path
+        if path and path in self._batch_wave_state:
+            self._batch_wave_state[path]["sections"] = list(
+                self._batch_waveform._sections)
+            self._batch_wave_state[path]["transposes"] = list(
+                self._batch_waveform._transposes)
 
     def _optimize_sections(self):
         """For each section, try ±12, ±24, ±36 from current transpose and pick the octave closest to model center."""
@@ -8124,6 +8179,9 @@ class SimplePage(QWidget):
         if path in self._source_paths:
             self._source_paths.remove(path)
             self._batch_wave_state.pop(path, None)
+            if path == self._focused_batch_path:
+                self._focused_batch_path = ""
+                self._batch_waveform.setVisible(False)
             # The × only shows on still-queued rows, so a removal
             # mid-batch is always a not-yet-converted file — safe to
             # pull from the live run without disturbing the index.
@@ -8144,6 +8202,8 @@ class SimplePage(QWidget):
             # reload if the lone file actually changed.
             self._convert_queue.setVisible(False)
             self._convert_queue.clear()
+            self._batch_waveform.setVisible(False)
+            self._focused_batch_path = ""
             self._waveform.setVisible(True)
             self._lbl_pitch.setVisible(True)
             only = self._source_paths[0]
