@@ -1496,8 +1496,14 @@ class _ConvertButton(QWidget):
         painter.end()
 
 
+# Item-data role flagging a clip row as silent (set on silent clip
+# items so the delegate can paint the red "silent" marker).
+_CLIP_SILENT_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
 class _ClipBadgeDelegate(QStyledItemDelegate):
-    """Paints an ISOLATED badge on the right of clips whose basename contains '_isolated'."""
+    """Paints an ISOLATED badge on isolated clips, and a red "silent"
+    marker on clips skipped for being silent."""
 
     # Vintage gold (mid-saturation, slightly aged)
     _BADGE_BG = QColor(193, 154, 70, 220)         # warm gold
@@ -1506,6 +1512,25 @@ class _ClipBadgeDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
+        # Silent clips — a red "silent" word on the right edge.
+        if index.data(_CLIP_SILENT_ROLE):
+            painter.save()
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                f = QFont(painter.font())
+                f.setPointSize(8)
+                f.setBold(True)
+                painter.setFont(f)
+                painter.setPen(QColor(224, 92, 92))
+                painter.drawText(
+                    option.rect.adjusted(0, 0, -10, 0),
+                    Qt.AlignmentFlag.AlignRight
+                    | Qt.AlignmentFlag.AlignVCenter,
+                    "silent",
+                )
+            finally:
+                painter.restore()
+            return
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
         # Match the current "_Isolated_Vocals" suffix and the older "_isolated" tag
         # so previously-isolated clips don't lose their badge after the rename.
@@ -2495,21 +2520,38 @@ class _CreateModelPanel(QWidget):
         grouped = set()
 
         # Files uploaded this session — grouped, with their split clips
-        # as expandable children (records whose clips are all gone are
-        # skipped, so it stays in step with self._clips).
+        # as expandable children. A clip shows if it's silent (kept as a
+        # "skipped" marker) or still in the trainable set; a non-silent
+        # clip the user removed just drops out. A record with nothing
+        # left to show is skipped, so it stays in step with self._clips.
         for rec in self._processed_files:
-            rec_clips = [c["path"] for c in rec.get("clips", [])
-                         if c["path"] in clips_set]
-            if not rec_clips:
+            visible = []
+            for c in rec.get("clips", []):
+                if c.get("silent"):
+                    visible.append((c["path"], True))
+                elif c["path"] in clips_set:
+                    visible.append((c["path"], False))
+            if not visible:
                 continue
-            file_node = QTreeWidgetItem([rec.get("name", "Audio file")])
+            n_train = sum(1 for _, sil in visible if not sil)
+            file_node = QTreeWidgetItem([
+                f"✓  {rec.get('name', 'Audio file')}"
+                f"    ·    {n_train} clip{'s' if n_train != 1 else ''}"
+            ])
             # Selecting the file node previews the original upload.
             file_node.setData(0, Qt.ItemDataRole.UserRole, rec.get("source"))
+            file_node.setForeground(0, QColor(125, 200, 150))
+            _fnt = QFont()
+            _fnt.setBold(True)
+            file_node.setFont(0, _fnt)
             self._file_list.addTopLevelItem(file_node)
-            for cp in rec_clips:
-                child, dur = _clip_item(cp)
+            for cp, silent in visible:
+                if silent:
+                    child = self._silent_clip_item(cp)
+                else:
+                    child, dur = _clip_item(cp)
+                    total_dur += dur
                 file_node.addChild(child)
-                total_dur += dur
                 grouped.add(cp)
 
         # Clips that didn't come through the auto-processor (e.g. an
@@ -2524,6 +2566,16 @@ class _CreateModelPanel(QWidget):
         total = len(self._clips)
         mins, secs = divmod(int(total_dur), 60)
         self._lbl_clips.setText(f"{total} clips  ·  {mins}:{secs:02d} total")
+
+    def _silent_clip_item(self, path: str):
+        """A leaf row for a silent clip — dimmed text, kept visible as a
+        'skipped, here's why' marker but never trained on. The red
+        'silent' badge is painted by _ClipBadgeDelegate."""
+        item = QTreeWidgetItem([os.path.basename(path)])
+        item.setData(0, Qt.ItemDataRole.UserRole, path)
+        item.setData(0, _CLIP_SILENT_ROLE, True)
+        item.setForeground(0, QColor(110, 110, 110))
+        return item
 
     def _on_clip_selected(self, current, previous=None):
         """Load the waveform for the selected clip row."""
