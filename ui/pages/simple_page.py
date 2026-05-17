@@ -7304,6 +7304,11 @@ class SimplePage(QWidget):
             )
             self._batch_wave_workers[path] = worker
             worker.start()
+        # Surface the shimmer placeholder as soon as analysis is running,
+        # before any row is clicked — unless a focused file's waveform
+        # already occupies the slot.
+        if self._batch_wave_workers and not self._batch_waveform.isVisible():
+            self._batch_wave_placeholder.setVisible(True)
 
     def _on_batch_wave_ready(self, path, samples, sections, transposes,
                              median_hz):
@@ -7311,9 +7316,7 @@ class SimplePage(QWidget):
         worker = self._batch_wave_workers.pop(path, None)
         if worker is not None:
             worker.wait(3000)  # already finished — returns at once, safe drop
-        if path not in self._source_paths:
-            return  # file was removed from the queue mid-analysis
-        if samples:
+        if path in self._source_paths and samples:
             self._batch_wave_state[path] = {
                 "samples": samples,
                 "sections": sections,
@@ -7323,6 +7326,10 @@ class SimplePage(QWidget):
             # If the user already clicked this file, show it now.
             if path == self._focused_batch_path:
                 self._load_batch_waveform(path)
+        # Once the whole queue's analysis is done, drop the shimmer
+        # placeholder if nothing replaced it (no file focused yet).
+        if not self._batch_wave_workers and not self._batch_waveform.isVisible():
+            self._batch_wave_placeholder.setVisible(False)
 
     def _focus_batch_file(self, path):
         """A queued batch row was clicked — show that file's waveform below
