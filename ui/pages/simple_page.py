@@ -3442,11 +3442,53 @@ class _CreateModelPanel(QWidget):
             return 500
         return 300
 
+    def _latest_checkpoint_epoch(self) -> int:
+        """Highest epoch among the selected model's G_*.pth checkpoints,
+        or 0 if it has none yet (a fresh model)."""
+        name = (self._selected_name or "").strip()
+        if not name:
+            return 0
+        best = 0
+        try:
+            for f in os.listdir(os.path.join(str(MODELS_DIR), name)):
+                if f.startswith("G_") and f.endswith(".pth"):
+                    num = f[2:-4]
+                    if num.isdigit():
+                        best = max(best, int(num))
+        except OSError:
+            pass
+        return best
+
+    def _auto_epoch_target(self, total_seconds: float = 0.0) -> int:
+        """Epoch count training will auto-pick for the current model:
+        the maturity-based resume target when it already has a
+        checkpoint, else the fresh-run count from clip duration.
+        Mirrors the auto logic in _start_training."""
+        cur_ep = self._latest_checkpoint_epoch()
+        if cur_ep <= 0:
+            return self._epoch_count_for_duration(total_seconds)
+        clips = max(len(self._clips), 1)
+        meta = self._load_model_metadata(
+            (self._selected_name or "").strip()
+        ) or {}
+        batch = int(meta.get("batch_size", 16) or 16)
+        maturity = (cur_ep * batch) / clips
+        if maturity >= 2000:
+            target = max(maturity * 1.25, maturity + 200)
+        elif maturity >= 800:
+            target = 2000
+        elif maturity >= 300:
+            target = 800
+        else:
+            target = 300
+        extra = int((target - maturity) * clips / max(batch, 1))
+        return max(cur_ep + max(extra, 100), cur_ep + 100)
+
     def _update_auto_epoch_placeholder(self, total_seconds: float = 0.0):
         """Show the auto-picked epoch count as the box's dim placeholder
         so an empty (auto) box previews what training will use."""
         self._txt_epochs.setPlaceholderText(
-            str(self._epoch_count_for_duration(total_seconds))
+            str(self._auto_epoch_target(total_seconds))
         )
 
     def _current_gpu_tier(self) -> str:
