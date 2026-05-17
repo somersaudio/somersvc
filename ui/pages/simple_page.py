@@ -6008,6 +6008,13 @@ class SimplePage(QWidget):
         self._lbl_model_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_model_name.setStyleSheet("color: #e6be5f; font-size: 14px; font-weight: bold; background: transparent; margin-top: -10px; padding: 0;")
         self._lbl_model_name.setFixedHeight(20)
+        # Slight gold glow on the centred artist name.
+        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+        _name_glow = QGraphicsDropShadowEffect(self._lbl_model_name)
+        _name_glow.setOffset(0, 0)
+        _name_glow.setBlurRadius(12)
+        _name_glow.setColor(QColor(230, 190, 95, 170))
+        self._lbl_model_name.setGraphicsEffect(_name_glow)
         layout.addWidget(self._lbl_model_name)
 
         # Match Artist's Range toggle + detail
