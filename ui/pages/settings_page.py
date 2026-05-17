@@ -133,7 +133,8 @@ class SettingsPage(QWidget):
         api_row.addWidget(self.txt_api_key, 1)
 
         self.btn_show_key = QPushButton("Show")
-        self.btn_show_key.setFixedWidth(60)
+        # No fixed width — 60px clipped "Show"/"Hide"; let it size to its
+        # content like the sibling Test / Get API Key buttons.
         self.btn_show_key.clicked.connect(self._toggle_key_visibility)
         api_row.addWidget(self.btn_show_key)
 
