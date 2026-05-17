@@ -5594,6 +5594,7 @@ class _ConvertQueueRow(QWidget):
         self.output_path = ""  # converted file, set once this row is done
         self.sections = None  # how many sections Range-Match split it into
         self._spin_idx = 0
+        self._selected = False  # row body clicked — focused for editing
         # Required for the converting-row highlight to actually paint.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -5680,18 +5681,36 @@ class _ConvertQueueRow(QWidget):
             f"color: {text_color}; font-size: 12px; font-weight: {weight};"
             " background: transparent;"
         )
-        # Faint highlight marks the file currently being converted.
-        if status == "converting":
-            self.setStyleSheet(
-                "_ConvertQueueRow { background-color: rgba(94,140,255,20);"
-                " border-radius: 6px; }"
-            )
-        else:
-            self.setStyleSheet("")
+        self._refresh_bg()
         # "Queued" marks a file still waiting to be converted.
         self._status_lbl.setText("Queued" if status == "queued" else "")
         self._status_lbl.setVisible(status == "queued")
         self._refresh_buttons()
+
+    def set_selected(self, selected: bool):
+        """Mark this row as the focused file — clicking a queue row
+        focuses its waveform, and this is the visible cue for it."""
+        selected = bool(selected)
+        if selected == self._selected:
+            return
+        self._selected = selected
+        self._refresh_bg()
+
+    def _refresh_bg(self):
+        """Paint the row background from status + selection. The
+        converting highlight wins over the selection tint; otherwise a
+        clicked row gets the same faint highlight as the trainer's clip
+        list (rgba(255,255,255,8))."""
+        if self.status == "converting":
+            bg = "rgba(94,140,255,20)"
+        elif self._selected:
+            bg = "rgba(255,255,255,8)"
+        else:
+            bg = "transparent"
+        self.setStyleSheet(
+            f"_ConvertQueueRow {{ background-color: {bg};"
+            f" border-radius: 6px; }}"
+        )
 
     def _refresh_buttons(self):
         # Remove only while queued; play only once a result exists.
@@ -5735,6 +5754,7 @@ class _ConvertQueueList(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rows: dict[str, _ConvertQueueRow] = {}
+        self._selected_path = None  # row currently focused for editing
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -5849,11 +5869,30 @@ class _ConvertQueueList(QWidget):
                     row.set_sections(secs)
             row.remove_requested.connect(self.remove_requested)
             row.play_requested.connect(self._on_row_play)
-            row.clicked.connect(self.row_clicked)
+            row.clicked.connect(self._on_row_clicked)
             self._list_layout.insertWidget(
                 self._list_layout.count() - 1, row
             )
             self._rows[p] = row
+        # Carry the focused row's highlight across a rebuild (files may
+        # have been added or removed); drop it if that file is gone.
+        if self._selected_path in self._rows:
+            self._rows[self._selected_path].set_selected(True)
+        else:
+            self._selected_path = None
+
+    def _on_row_clicked(self, path: str):
+        """A row body was clicked — move the focus highlight to it and
+        forward the click so the page can show that file's waveform."""
+        self.set_selected(path)
+        self.row_clicked.emit(path)
+
+    def set_selected(self, path):
+        """Highlight one row as focused, clearing the highlight on the
+        rest. Pass None to clear all."""
+        self._selected_path = path
+        for p, row in self._rows.items():
+            row.set_selected(p == path)
 
     def row(self, path: str):
         return self._rows.get(path)
@@ -5879,6 +5918,7 @@ class _ConvertQueueList(QWidget):
         except Exception:
             pass
         self._playing_path = None
+        self._selected_path = None
         self.set_files([])
         self._header.setText("")
 
