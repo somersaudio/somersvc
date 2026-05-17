@@ -30,7 +30,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        # Translucent so the corner notches clipped away by the rounded
+        # content layer (see _apply_rounded_corners) are actually
+        # transparent rather than showing a square window edge.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMinimumSize(900, 700)
         self.resize(1072, 1060)
         self._drag_pos = None
@@ -487,6 +490,9 @@ class MainWindow(QMainWindow):
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, self._position_gear_buttons)
         self._position_window_controls()
+        # Re-assert the rounded content layer (survives any layer
+        # reconfiguration Qt does on resize).
+        self._apply_rounded_corners()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -507,6 +513,54 @@ class MainWindow(QMainWindow):
             self._btn_minimize.move(26, 6)
             self._btn_close.raise_()
             self._btn_minimize.raise_()
+
+    def _apply_rounded_corners(self, radius: float = 10.0):
+        """Give the frameless window macOS-standard rounded corners.
+
+        A FramelessWindowHint window is a hard rectangle. Setting
+        cornerRadius + masksToBounds on the content view's Core Animation
+        layer makes macOS clip the whole window — every page and overlay —
+        to an anti-aliased rounded rect, the same corner the OS draws on a
+        normal window. Pairs with WA_TranslucentBackground so the
+        clipped-away corner notches are transparent. ctypes/objc so we
+        don't have to bundle PyObjC.
+        """
+        import sys
+        if sys.platform != "darwin":
+            return
+        try:
+            import ctypes
+            objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.dylib")
+            objc.sel_registerName.restype = ctypes.c_void_p
+            objc.objc_msgSend.restype = ctypes.c_void_p
+            view = ctypes.c_void_p(int(self.winId()))   # NSView* on macOS
+
+            # view.setWantsLayer:YES — ensure the view is layer-backed
+            objc.objc_msgSend.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+            objc.objc_msgSend(
+                view, objc.sel_registerName(b"setWantsLayer:"), True)
+
+            # layer = view.layer
+            objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            layer = objc.objc_msgSend(view, objc.sel_registerName(b"layer"))
+            if not layer:
+                return
+
+            # layer.cornerRadius = radius   (CGFloat)
+            objc.objc_msgSend.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double]
+            objc.objc_msgSend(
+                layer, objc.sel_registerName(b"setCornerRadius:"),
+                float(radius))
+
+            # layer.masksToBounds = YES — clip content to the rounded rect
+            objc.objc_msgSend.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+            objc.objc_msgSend(
+                layer, objc.sel_registerName(b"setMasksToBounds:"), True)
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         # If training is running, tell the worker we're closing so it leaves
