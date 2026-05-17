@@ -1737,6 +1737,15 @@ class _CreateModelPanel(QWidget):
         # numbers (0..delta). We add this offset so the live counter shows
         # TOTAL epochs continuous with the previous run.
         self._resume_offset = 0
+        # Braille-spinner animation for the top-right "isolating"
+        # indicator — mirrors the analyzing/converting spinner.
+        self._isolating_frames = [
+            "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"
+        ]
+        self._isolating_idx = 0
+        self._isolating_timer = QTimer(self)
+        self._isolating_timer.setInterval(80)
+        self._isolating_timer.timeout.connect(self._spin_isolating)
         self._image_cache_dir = os.path.join(CACHE_DIR, "artist_thumbs")
         # Per-artist staged clips for pending (not-yet-trained) artists.
         # Persists clip selections across artist switches before the dataset
@@ -4918,6 +4927,9 @@ class _CreateModelPanel(QWidget):
         # pumping the variable-width separator log into the status line.
         self._lbl_status.setText("")
         self._lbl_isolating.setVisible(True)
+        self._isolating_idx = 0
+        self._spin_isolating()
+        self._isolating_timer.start()
 
         def _on_queue(done: int, total: int, name: str):
             # Just advance the progress bar — the top-right "isolating"
@@ -4944,10 +4956,19 @@ class _CreateModelPanel(QWidget):
         if dl_dialog is not None:
             dl_dialog.exec()
 
+    def _spin_isolating(self):
+        """Advance the top-right 'isolating' indicator by one braille
+        frame — same animation as the analyzing/converting spinner."""
+        self._isolating_idx = (
+            (self._isolating_idx + 1) % len(self._isolating_frames))
+        frame = self._isolating_frames[self._isolating_idx]
+        self._lbl_isolating.setText(f"{frame} isolating {frame}")
+
     def _on_iso_done(self, vocals, errors):
         # Drop the queue progress bar + the "isolating" indicator now that
         # we're done.
         self._progress_bar.setVisible(False)
+        self._isolating_timer.stop()
         self._lbl_isolating.setVisible(False)
         # Rename Demucs's bare "vocals.wav" to "<song>_Isolated_Vocals.wav" so
         # the filename carries the provenance — both for the badge in the file
