@@ -520,6 +520,27 @@ class MainWindow(QMainWindow):
                     worker.request_app_close()
         except Exception:
             pass
-        self.simple_page.save_session()
-        self.training_page.cleanup()
-        super().closeEvent(event)
+        # Persist everything that matters BEFORE we exit.
+        try:
+            self.simple_page.save_session()
+        except Exception:
+            pass
+        try:
+            self.training_page.cleanup()
+        except Exception:
+            pass
+        # Hard-exit instead of letting Qt run its orderly teardown. Background
+        # QThreads (conversion, waveform analysis, image fetches, clip
+        # processing, ...) may still be running; Qt's ~QThread calls
+        # qFatal()->abort() the instant it destroys a still-running thread,
+        # which turns a normal quit into a SIGABRT crash. os._exit() ends the
+        # process immediately — the OS reaps the threads — so the window
+        # closes instantly with no wait and no crash. Safe here because the
+        # only state that needs flushing (session + pod detach) is done above.
+        import sys
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(0)
