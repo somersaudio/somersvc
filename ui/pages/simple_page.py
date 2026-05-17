@@ -4524,6 +4524,9 @@ class _CreateModelPanel(QWidget):
                 f"<b>{value}</b>{suffix}"
             )
 
+        # Model type (SVC / RVC) — file-detected; for downloaded models
+        # this is now the place the type is shown (dropdown badge dropped).
+        rows.append(_row("Type", (metadata.get("model_type") or "svc").upper()))
         rows.append(_row("Epochs", f"{epochs:,}"))
         if duration > 0:
             rows.append(_row("Duration", dur_str))
@@ -7824,17 +7827,9 @@ class SimplePage(QWidget):
         vy = rect.center().y() + viewport_offset.y()
         rx = rect.right() + viewport_offset.x()
 
-        # Model type badge (SVC/RVC)
-        model_type = model_info.get("type", "").upper()
-        if model_type:
-            type_lbl = QLabel(model_type, self._dropdown)
-            type_lbl.setObjectName("dl_btn_float")
-            type_lbl.setFixedSize(32, 18)
-            type_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            type_color = "rgba(180, 130, 255, 130)" if model_type == "SVC" else "rgba(255, 180, 100, 130)"
-            type_lbl.setStyleSheet(f"color: {type_color}; font-size: 9px; font-weight: bold; background: transparent;")
-            type_lbl.move(rx - 210, vy - 9)
-            type_lbl.show()
+        # (No SVC/RVC badge here — it was a guess from the folder name and
+        # often wrong. The real, file-detected type shows in the metadata
+        # panel once the model is downloaded.)
 
         # Source badge (HF)
         hf_lbl = QLabel("HF", self._dropdown)
