@@ -5904,6 +5904,10 @@ class SimplePage(QWidget):
         self._batch_wave_state = {}
         self._batch_wave_workers = {}
         self._focused_batch_path = ""  # batch file whose waveform is shown
+        # Batch files whose waveform was edited after they were already
+        # converted — their output is stale. When such a file is focused
+        # the Convert button shows "Update" and re-converts just it.
+        self._batch_wave_dirty = set()
         self._section_cache = {}
         self._selected_model_idx = -1
         self._optimized_for_model = -1  # model idx the waveform was last optimized for
@@ -6950,6 +6954,7 @@ class SimplePage(QWidget):
         self._original_source = ""
         self._source_paths = []
         self._batch_wave_state.clear()
+        self._batch_wave_dirty.clear()
         self._focused_batch_path = ""
         if getattr(self, "_batch_waveform", None) is not None:
             self._batch_waveform.setVisible(False)
@@ -7124,6 +7129,10 @@ class SimplePage(QWidget):
         self._focused_batch_path = path
         if path in self._batch_wave_state:
             self._load_batch_waveform(path)
+        # The "Update" button tracks the focused file: lit only when this
+        # file's waveform was edited after it was already converted.
+        if not self._batch_running:
+            self._convert_ring.set_update_mode(path in self._batch_wave_dirty)
 
     def _load_batch_waveform(self, path):
         """Load a batch file's cached waveform state into the editor."""
@@ -7137,13 +7146,18 @@ class SimplePage(QWidget):
 
     def _on_batch_wave_edited(self):
         """The focused batch file's waveform was edited — persist its
-        sections/transposes back to that file's state."""
+        sections/transposes back to that file's state. If the file was
+        already converted its output is now stale, so mark it dirty and
+        light the "Update" button to offer a one-file re-convert."""
         path = self._focused_batch_path
         if path and path in self._batch_wave_state:
             self._batch_wave_state[path]["sections"] = list(
                 self._batch_waveform._sections)
             self._batch_wave_state[path]["transposes"] = list(
                 self._batch_waveform._transposes)
+            if not self._batch_running and path in self._batch_results:
+                self._batch_wave_dirty.add(path)
+                self._convert_ring.set_update_mode(True)
 
     def _optimize_sections(self):
         """For each section, try ±12, ±24, ±36 from current transpose and pick the octave closest to model center."""
@@ -7320,6 +7334,11 @@ class SimplePage(QWidget):
 
         # Batch mode — convert the whole queue, one file at a time.
         if len(self._source_paths) >= 2:
+            # A focused, already-converted file whose waveform was edited:
+            # re-convert just it instead of running the whole queue.
+            if self._focused_batch_path in self._batch_wave_dirty:
+                self._update_batch_file()
+                return
             self._start_batch()
             return
 
@@ -7589,6 +7608,53 @@ class SimplePage(QWidget):
             f"Batch: converting {len(self._batch_files)} files "
             f"→ {os.path.basename(self._batch_output_dir)}/"
         )
+        QTimer.singleShot(50, self._position_bottom_panel)
+        self._batch_next()
+
+    def _update_batch_file(self):
+        """Re-convert just the focused batch file after its waveform was
+        edited. Runs the batch machinery as a one-file pass: it lands in
+        the same batch folder and overwrites that file's stale output.
+        Step 3 already feeds each file its stored sections/transposes,
+        so the edited waveform is applied automatically."""
+        path = self._focused_batch_path
+        if (not path or path not in self._batch_wave_dirty
+                or not os.path.exists(path)):
+            self._convert_ring.set_update_mode(False)
+            return
+        # Reuse the model resolved for the original batch run; fall back
+        # to the current selection only if that state is somehow gone.
+        if not getattr(self, "_batch_model_path", ""):
+            resolved = self._resolve_selected_model()
+            if resolved is None:
+                return
+            (self._batch_model_dir, self._batch_mt,
+             self._batch_model_path, self._batch_config_path) = resolved
+        if (not getattr(self, "_batch_output_dir", "")
+                or not os.path.isdir(self._batch_output_dir)):
+            artist = (os.path.basename(self._batch_model_dir)
+                      if self._batch_model_dir else "converted")
+            self._batch_output_dir = self._make_batch_folder(artist)
+        # Drop the stale output so the worker writes a clean file.
+        old_out = self._batch_results.get(path)
+        if old_out and os.path.exists(old_out):
+            try:
+                os.remove(old_out)
+            except OSError:
+                pass
+        self._batch_wave_dirty.discard(path)
+        self._batch_files = [path]
+        self._batch_index = 0
+        self._batch_done = 0
+        self._batch_failed = []
+        self._batch_running = True
+        self._convert_queue.set_status(path, "queued")
+        self._convert_ring.set_update_mode(False)
+        self._convert_ring.set_converting(True)
+        self._convert_ring.set_progress(0.02)
+        self._show_spinner("converting")
+        self._log.clear_log()
+        self._log.append_line(f"Updating {os.path.basename(path)}")
         QTimer.singleShot(50, self._position_bottom_panel)
         self._batch_next()
 
@@ -8214,6 +8280,7 @@ class SimplePage(QWidget):
         if path in self._source_paths:
             self._source_paths.remove(path)
             self._batch_wave_state.pop(path, None)
+            self._batch_wave_dirty.discard(path)
             if path == self._focused_batch_path:
                 self._focused_batch_path = ""
                 self._batch_waveform.setVisible(False)
@@ -8239,6 +8306,10 @@ class SimplePage(QWidget):
             self._convert_queue.clear()
             self._batch_waveform.setVisible(False)
             self._focused_batch_path = ""
+            # Leaving batch mode — a pending batch "Update" must not
+            # leak into the single-file convert button.
+            if self._convert_ring._update_mode and not self._batch_running:
+                self._convert_ring.set_update_mode(False)
             self._waveform.setVisible(True)
             self._lbl_pitch.setVisible(True)
             only = self._source_paths[0]
