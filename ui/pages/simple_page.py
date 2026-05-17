@@ -3614,6 +3614,11 @@ class _CreateModelPanel(QWidget):
         tier = cfg.get("preferred_gpu_tier", "cheapest")
         params = self._TIER_TIMING.get(tier, self._TIER_TIMING["cheapest"])
         chosen = params["label"]
+        # "GPU" in cyan, the GPU name in green.
+        head = (
+            '<span style="color:#22d3ee;">GPU</span> - '
+            f'<span style="color:#4ade80;">{chosen}</span>'
+        )
         if getattr(self, "_gpu_chosen_unavail", False):
             active = getattr(self, "_gpu_active", None)
             if getattr(self, "_gpu_got", False) and active:
@@ -3625,12 +3630,11 @@ class _CreateModelPanel(QWidget):
             # Chosen GPU pinned on top with "unavailable"; the GPU actually
             # being tried / now in use sits on the line beneath it.
             self._lbl_gpu.setText(
-                f'GPU - {chosen} '
-                f'<span style="color:#e0a040;">· unavailable</span>'
+                f'{head} <span style="color:#e0a040;">· unavailable</span>'
                 f'<br><span style="color:#9a9a9a;">{second}</span>'
             )
         else:
-            self._lbl_gpu.setText(f"GPU - {chosen}")
+            self._lbl_gpu.setText(head)
 
     def _parse_gpu_provisioning(self, line: str):
         """Watch the cloud-provisioning log lines (emitted by RunPodClient's
