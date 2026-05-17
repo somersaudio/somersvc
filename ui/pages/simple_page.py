@@ -3668,10 +3668,13 @@ class _CreateModelPanel(QWidget):
         )
         if getattr(self, "_gpu_chosen_unavail", False):
             active = getattr(self, "_gpu_active", None)
+            # The fallback GPU name is greened to match the chosen GPU
+            # above it; "using"/"trying" stay grey via the outer span.
+            gpu = f'<span style="color:#4ade80;">{active}</span>'
             if getattr(self, "_gpu_got", False) and active:
-                second = f"using {active}"
+                second = f"using {gpu}"
             elif active:
-                second = f"trying {active}…"
+                second = f"trying {gpu}…"
             else:
                 second = "finding a GPU…"
             # Chosen GPU pinned on top with "unavailable"; the GPU actually
