@@ -5887,6 +5887,13 @@ class SimplePage(QWidget):
         self._batch_failed = []
         self._batch_results = {}  # source path -> converted output path
         self._batch_output_dir = ""  # per-batch <artist>_Batch_<N> folder
+        # Per-file waveform state for batch mode — path -> {samples,
+        # sections, transposes, median_hz}. Analyzed in the background as
+        # files are queued so each batch file has its own editable
+        # waveform (see _batch_waveform). _batch_wave_workers holds the
+        # in-flight analyzer threads so they aren't GC'd while running.
+        self._batch_wave_state = {}
+        self._batch_wave_workers = {}
         self._section_cache = {}
         self._selected_model_idx = -1
         self._optimized_for_model = -1  # model idx the waveform was last optimized for
@@ -6921,6 +6928,7 @@ class SimplePage(QWidget):
         self._source_path = ""
         self._original_source = ""
         self._source_paths = []
+        self._batch_wave_state.clear()
         self._source_median_hz = 0
         self._section_cache = {}
         # Clean up section cache files
@@ -7048,6 +7056,39 @@ class SimplePage(QWidget):
             self._opt_container.setVisible(vis)
             self._optimized_for_model = self._selected_model_idx
             self._mark_optimize_clean()
+
+    def _ensure_batch_analyzed(self):
+        """Kick off background waveform analysis for any queued batch file
+        not analysed yet, so each file has its own editable waveform ready
+        when its row is clicked. Idempotent — safe to call on every sync."""
+        for path in self._source_paths:
+            if path in self._batch_wave_state or path in self._batch_wave_workers:
+                continue
+            if not os.path.exists(path):
+                continue
+            worker = _WaveformAnalyzer(path, self._model_center_hz)
+            worker.finished.connect(
+                lambda s, sec, tr, mh, p=path: self._on_batch_wave_ready(
+                    p, s, sec, tr, mh)
+            )
+            self._batch_wave_workers[path] = worker
+            worker.start()
+
+    def _on_batch_wave_ready(self, path, samples, sections, transposes,
+                             median_hz):
+        """Store one batch file's analysed waveform state."""
+        worker = self._batch_wave_workers.pop(path, None)
+        if worker is not None:
+            worker.wait(3000)  # already finished — returns at once, safe drop
+        if path not in self._source_paths:
+            return  # file was removed from the queue mid-analysis
+        if samples:
+            self._batch_wave_state[path] = {
+                "samples": samples,
+                "sections": sections,
+                "transposes": transposes,
+                "median_hz": median_hz,
+            }
 
     def _optimize_sections(self):
         """For each section, try ±12, ±24, ±36 from current transpose and pick the octave closest to model center."""
@@ -8082,6 +8123,7 @@ class SimplePage(QWidget):
         """Drop one file from the batch queue (a row's × button)."""
         if path in self._source_paths:
             self._source_paths.remove(path)
+            self._batch_wave_state.pop(path, None)
             # The × only shows on still-queued rows, so a removal
             # mid-batch is always a not-yet-converted file — safe to
             # pull from the live run without disturbing the index.
@@ -8110,6 +8152,7 @@ class SimplePage(QWidget):
             return
         # Batch mode — the queue list stands in for the waveform editor.
         self._convert_queue.set_files(self._source_paths)
+        self._ensure_batch_analyzed()
         self._convert_queue.setVisible(True)
         self._btn_clear_source.setVisible(True)
         self._waveform.setVisible(False)
