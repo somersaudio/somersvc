@@ -3592,10 +3592,31 @@ class _CreateModelPanel(QWidget):
 
     def _update_auto_epoch_placeholder(self, total_seconds: float = 0.0):
         """Show the auto-picked epoch count as the box's dim placeholder
-        so an empty (auto) box previews what training will use."""
+        so an empty (auto) box previews what training will use.
+
+        While a run is in progress, preview that run's actual target
+        instead — otherwise the box shows a speculative count for a
+        hypothetical next run (e.g. 2000) that disagrees with the live
+        'Epoch N/<target>' readout (e.g. /2500)."""
+        if getattr(self, "_training", False) and self._recommended_epochs > 0:
+            self._txt_epochs.setPlaceholderText(
+                str(int(self._recommended_epochs))
+            )
+            return
         self._txt_epochs.setPlaceholderText(
             str(self._auto_epoch_target(total_seconds))
         )
+
+    def _refresh_auto_epoch_from_clips(self):
+        """Recompute the box's auto placeholder from the current clip
+        set — used once a run ends so the box stops previewing that
+        run's target and goes back to previewing the next one."""
+        try:
+            import soundfile as _sf
+            dur = sum(_sf.info(p).duration for p in self._clips)
+        except Exception:
+            dur = 0.0
+        self._update_auto_epoch_placeholder(dur)
 
     def _current_gpu_tier(self) -> str:
         try:
@@ -5253,6 +5274,8 @@ class _CreateModelPanel(QWidget):
             self._progress_bar.setVisible(True)
             self._worker.start()
             self._training = True
+            # Box now previews this run's target, not a speculative count.
+            self._update_auto_epoch_placeholder()
             self._btn_stop_train.setVisible(True)
             self._btn_stop_train.setEnabled(True)
             self._btn_train.setVisible(False)
@@ -5456,6 +5479,7 @@ class _CreateModelPanel(QWidget):
             pass
         self._progress_bar.setValue(100)
         self._lbl_epoch.setVisible(False)
+        self._refresh_auto_epoch_from_clips()
         self._lbl_status.setText("Training complete! Model is ready.")
         self._lbl_status.setStyleSheet("color: rgba(80, 200, 120, 150); font-size: 11px; background: transparent;")
         self.training_stopped.emit()
@@ -5472,6 +5496,7 @@ class _CreateModelPanel(QWidget):
         self._check_existing_model(self._selected_name)
         self._progress_bar.setVisible(False)
         self._lbl_epoch.setVisible(False)
+        self._refresh_auto_epoch_from_clips()
         # User-cancelled errors get a friendlier message than "Error: stopped".
         was_cancelled = (
             getattr(self, "_auto_stop_fired", False)
@@ -8668,6 +8693,8 @@ class SimplePage(QWidget):
             panel._recommended_epochs = rec
             panel._auto_stop_fired = False
             panel._log.append_line(f"Restored auto-stop target: {rec} epochs")
+            # Box previews the restored run's target, not a fresh count.
+            panel._update_auto_epoch_placeholder()
         # Restore the resume offset so the live counter shows TOTAL epochs
         # while the orchestrator's runner is reporting session-local numbers.
         prev_epochs = job.get("previous_epochs")
