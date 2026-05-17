@@ -1947,7 +1947,7 @@ class _CreateModelPanel(QWidget):
         layout.addWidget(self._file_list)
 
         self._lbl_clips = QLabel("")
-        self._lbl_clips.setStyleSheet("color: rgba(255, 255, 255, 40); font-size: 10px; background: transparent;")
+        self._lbl_clips.setStyleSheet("color: rgba(255, 255, 255, 150); font-size: 10px; background: transparent;")
         self._lbl_clips.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._lbl_clips)
 
@@ -1956,37 +1956,37 @@ class _CreateModelPanel(QWidget):
         action_row.addStretch()
 
         self._btn_browse_clips = QLabel("+ Add files")
-        self._btn_browse_clips.setStyleSheet("color: rgba(255, 255, 255, 60); font-size: 10px; background: transparent;")
+        self._btn_browse_clips.setStyleSheet("color: rgba(255, 255, 255, 165); font-size: 10px; background: transparent;")
         self._btn_browse_clips.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_browse_clips.mousePressEvent = lambda e: self._browse_clips()
         action_row.addWidget(self._btn_browse_clips)
 
         dot1 = QLabel(" · ")
-        dot1.setStyleSheet("color: rgba(255, 255, 255, 30); font-size: 10px; background: transparent;")
+        dot1.setStyleSheet("color: rgba(255, 255, 255, 90); font-size: 10px; background: transparent;")
         action_row.addWidget(dot1)
 
         self._btn_isolate = QLabel("Isolate selected vocals")
-        self._btn_isolate.setStyleSheet("color: rgba(94, 200, 180, 80); font-size: 10px; background: transparent;")
+        self._btn_isolate.setStyleSheet("color: rgba(94, 200, 180, 200); font-size: 10px; background: transparent;")
         self._btn_isolate.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_isolate.mousePressEvent = lambda e: self._isolate_vocals()
         action_row.addWidget(self._btn_isolate)
 
         dot2 = QLabel(" · ")
-        dot2.setStyleSheet("color: rgba(255, 255, 255, 30); font-size: 10px; background: transparent;")
+        dot2.setStyleSheet("color: rgba(255, 255, 255, 90); font-size: 10px; background: transparent;")
         action_row.addWidget(dot2)
 
         self._btn_remove_clip = QLabel("Remove selected")
-        self._btn_remove_clip.setStyleSheet("color: rgba(255, 100, 100, 60); font-size: 10px; background: transparent;")
+        self._btn_remove_clip.setStyleSheet("color: rgba(255, 100, 100, 190); font-size: 10px; background: transparent;")
         self._btn_remove_clip.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_remove_clip.mousePressEvent = lambda e: self._remove_selected_clip()
         action_row.addWidget(self._btn_remove_clip)
 
         dot_norm = QLabel(" · ")
-        dot_norm.setStyleSheet("color: rgba(255, 255, 255, 30); font-size: 10px; background: transparent;")
+        dot_norm.setStyleSheet("color: rgba(255, 255, 255, 90); font-size: 10px; background: transparent;")
         action_row.addWidget(dot_norm)
 
         self._btn_normalize_clip = QLabel("Normalize")
-        self._btn_normalize_clip.setStyleSheet("color: rgba(94, 200, 180, 80); font-size: 10px; background: transparent;")
+        self._btn_normalize_clip.setStyleSheet("color: rgba(94, 200, 180, 200); font-size: 10px; background: transparent;")
         self._btn_normalize_clip.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_normalize_clip.setToolTip("Bring the selected clips' RMS loudness to -12 dBFS (peak-safe)")
         self._btn_normalize_clip.mousePressEvent = lambda e: self._normalize_selected_clips()
@@ -2004,11 +2004,11 @@ class _CreateModelPanel(QWidget):
             w.setVisible(False)
 
         dot4 = QLabel(" · ")
-        dot4.setStyleSheet("color: rgba(255, 255, 255, 30); font-size: 10px; background: transparent;")
+        dot4.setStyleSheet("color: rgba(255, 255, 255, 90); font-size: 10px; background: transparent;")
         action_row.addWidget(dot4)
 
         self._btn_delete_dataset = QLabel("Delete dataset")
-        self._btn_delete_dataset.setStyleSheet("color: rgba(255, 100, 100, 60); font-size: 10px; background: transparent;")
+        self._btn_delete_dataset.setStyleSheet("color: rgba(255, 100, 100, 190); font-size: 10px; background: transparent;")
         self._btn_delete_dataset.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_delete_dataset.mousePressEvent = lambda e: self._delete_dataset()
         action_row.addWidget(self._btn_delete_dataset)
