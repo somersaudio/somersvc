@@ -3,6 +3,7 @@
 import os
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 
 
@@ -42,8 +43,13 @@ class R2Client:
         so callers can show progress.
         """
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        # Single-threaded transfer. boto3's default pool (up to 10 threads)
+        # runs inside the GUI process and starved the main thread of the
+        # GIL during the download — the spinner and best-match GIF visibly
+        # stuttered. One stream is plenty fast for R2 and keeps the UI smooth.
         self._client().download_file(
             self.bucket, r2_key, local_path, Callback=callback,
+            Config=TransferConfig(use_threads=False),
         )
 
     def head_size(self, r2_key: str) -> int:
