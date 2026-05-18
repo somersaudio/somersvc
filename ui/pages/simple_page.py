@@ -311,8 +311,11 @@ class _ClipProcessWorker(QThread):
         return {"name": os.path.basename(path), "source": path,
                 "staged_dir": work_dir, "clips": clips, "error": ""}
 
-    def _is_silent(self, path: str) -> bool:
-        """RMS over the first ~10s below ~-50 dBFS — too quiet to train on."""
+    @staticmethod
+    def _is_silent(path: str) -> bool:
+        """RMS over the first ~10s below ~-50 dBFS — too quiet to train on.
+        Static so other code (e.g. the post-isolation re-check) can reuse
+        the exact same silence test."""
         import numpy as np
         import soundfile as sf
         try:
@@ -325,7 +328,7 @@ class _ClipProcessWorker(QThread):
                 data = data.mean(axis=1)
             if data.size == 0:
                 return True
-            return float(np.sqrt(np.mean(data ** 2))) < self.SILENCE_RMS
+            return float(np.sqrt(np.mean(data ** 2))) < _ClipProcessWorker.SILENCE_RMS
         except Exception:
             return False
 
@@ -4924,7 +4927,11 @@ class _CreateModelPanel(QWidget):
                         stems = sep.separate(p, self.out_dir, on_log=parse)
                         # Pair the vocal with its source so _on_iso_done
                         # can slot it back into the source's file group.
-                        vocals.append((p, stems["vocals"]))
+                        # Re-run the silence check on the isolated vocal —
+                        # an instrumental-only section can come back near
+                        # silent and shouldn't be trained on.
+                        silent = _ClipProcessWorker._is_silent(stems["vocals"])
+                        vocals.append((p, stems["vocals"], silent))
                         self._download_phase = False
                     except Exception as e:
                         errors.append(f"{name}: {e}")
@@ -5013,13 +5020,14 @@ class _CreateModelPanel(QWidget):
         self._progress_bar.setVisible(False)
         self._isolating_timer.stop()
         self._lbl_isolating.setVisible(False)
-        # `vocals` is a list of (source_clip, demucs vocals.wav) pairs.
-        # Rename Demucs's bare "vocals.wav" to "<song>_Isolated_Vocals.wav"
-        # so the filename carries the provenance, then copy it out of the
-        # temp isolation dir to a stable home next to its source clip.
+        # `vocals` is a list of (source_clip, demucs vocals.wav, silent)
+        # triples. Rename Demucs's bare "vocals.wav" to
+        # "<song>_Isolated_Vocals.wav" so the filename carries the
+        # provenance, then copy it out of the temp isolation dir to a
+        # stable home next to its source clip.
         import shutil
-        pairs = []  # (source_clip, isolated_clip) — both stable paths
-        for src, v in vocals:
+        pairs = []  # (source_clip, isolated_clip, silent)
+        for src, v, silent in vocals:
             try:
                 song_dir = os.path.dirname(v)
                 song_stem = os.path.basename(song_dir)
@@ -5031,14 +5039,19 @@ class _CreateModelPanel(QWidget):
                     os.path.dirname(src), os.path.basename(tagged))
                 if os.path.abspath(dest) != os.path.abspath(tagged):
                     shutil.copy2(tagged, dest)
-                pairs.append((src, dest))
+                pairs.append((src, dest, silent))
             except Exception:
-                pairs.append((src, v))
+                pairs.append((src, v, silent))
         if pairs:
             self._apply_isolated_clips(pairs)
-            self._lbl_status.setText(
-                f"Isolated vocals from {len(pairs)} clip(s)."
-            )
+            n_silent = sum(1 for _, _, sil in pairs if sil)
+            status = f"Isolated vocals from {len(pairs)} clip(s)."
+            if n_silent:
+                status += (
+                    f" {n_silent} came back silent and "
+                    f"{'was' if n_silent == 1 else 'were'} skipped."
+                )
+            self._lbl_status.setText(status)
             self._lbl_status.setStyleSheet(
                 "color: rgba(80, 200, 120, 150); font-size: 11px;"
                 " background: transparent;"
@@ -5065,19 +5078,21 @@ class _CreateModelPanel(QWidget):
         switch, app restart, post-training refresh)."""
         safe_roots = [os.path.abspath(str(CACHE_DIR)),
                       os.path.abspath(str(DATASETS_DIR))]
-        for src, iso in pairs:
+        for src, iso, silent in pairs:
             # Swap the entry inside whichever file group owns it.
             for rec in self._processed_files:
                 clips = rec.get("clips", [])
                 hit = next((i for i, c in enumerate(clips)
                             if c.get("path") == src), -1)
                 if hit >= 0:
-                    clips[hit] = {"path": iso, "silent": False}
+                    clips[hit] = {"path": iso, "silent": silent}
                     break
-            # Keep the flat clip list (what the trainer consumes) in step.
+            # The flat clip list holds only trainable (non-silent) clips:
+            # drop the original, add the isolated clip unless it came
+            # back silent (an instrumental-only section, say).
             if src in self._clips:
-                self._clips = [iso if c == src else c for c in self._clips]
-            elif iso not in self._clips:
+                self._clips.remove(src)
+            if not silent and iso not in self._clips:
                 self._clips.append(iso)
             # Drop the non-isolated original from disk so it can't come
             # back on the next rebuild. Only ever an app-managed clip
