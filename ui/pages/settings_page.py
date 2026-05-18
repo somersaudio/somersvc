@@ -298,14 +298,6 @@ class SettingsPage(QWidget):
 
         layout.addStretch()
 
-        # GetSongBPM attribution (bottom-right)
-        attribution = QLabel('<a href="https://getsongbpm.com" style="color: #555; text-decoration: none;">Song key data powered by GetSongBPM.com</a>')
-        attribution.setOpenExternalLinks(True)
-        attribution.setAlignment(Qt.AlignmentFlag.AlignRight)
-        attribution.setCursor(Qt.CursorShape.PointingHandCursor)
-        attribution.setStyleSheet("font-size: 11px; padding-right: 12px; padding-bottom: 8px;")
-        layout.addWidget(attribution)
-
     def _load_saved(self):
         config = load_config()
         api_key = config.get("runpod_api_key", os.environ.get("SOMERSVC_RUNPOD_KEY", ""))
