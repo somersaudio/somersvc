@@ -2947,9 +2947,29 @@ class _CreateModelPanel(QWidget):
         except Exception:
             return False
 
+    def _delete_clip_file(self, path: str):
+        """Delete a clip from disk — but only when it lives inside the
+        app's managed cache/datasets dirs, never the user's own upload.
+        Without this, a removed clip reappears the moment the panel
+        reloads its list from disk (artist switch / app restart)."""
+        if not path:
+            return
+        abs_p = os.path.abspath(path)
+        roots = (os.path.abspath(str(CACHE_DIR)),
+                 os.path.abspath(str(DATASETS_DIR)))
+        if any(abs_p.startswith(r + os.sep) for r in roots):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def _remove_selected_clip(self):
         """Remove selected clips — or a whole uploaded file when its
-        file node is selected (record, clips, and staged copies)."""
+        file node is selected (record, clips, and staged copies).
+
+        Removed clips are deleted from disk and the per-artist pending
+        list is rewritten, so a deletion sticks across an artist switch
+        or an app restart instead of being reloaded from disk."""
         items = self._file_list.selectedItems()
         if not items:
             cur = self._file_list.currentItem()
@@ -2962,8 +2982,10 @@ class _CreateModelPanel(QWidget):
             if rec is not None:
                 # File node — drop the whole uploaded file.
                 for c in rec.get("clips", []):
-                    if c["path"] in self._clips:
-                        self._clips.remove(c["path"])
+                    cp = c.get("path")
+                    if cp in self._clips:
+                        self._clips.remove(cp)
+                    self._delete_clip_file(cp)
                 staged = rec.get("staged_dir")
                 if staged and os.path.isdir(staged):
                     import shutil
@@ -2974,7 +2996,18 @@ class _CreateModelPanel(QWidget):
                 p = it.data(0, Qt.ItemDataRole.UserRole)
                 if p in self._clips:
                     self._clips.remove(p)
+                # Drop it from its file group too so the grouping stays
+                # accurate, then delete it so it can't come back.
+                for r in self._processed_files:
+                    r["clips"] = [c for c in r.get("clips", [])
+                                  if c.get("path") != p]
+                self._delete_clip_file(p)
         self._refresh_file_list()
+        # Persist the trimmed list for pending (untrained) artists so the
+        # removal survives a panel reopen.
+        name = (self._selected_name or "").strip()
+        if name and not os.path.isdir(os.path.join(str(DATASETS_DIR), name)):
+            self._pending_clips_by_artist[name] = list(self._clips)
 
     def _ask_export_options(self, name: str, dataset_files: list, dataset_dur: float):
         """Show a small dialog asking whether to bundle training data.
