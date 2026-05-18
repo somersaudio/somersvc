@@ -2,47 +2,51 @@
 
 import runpod
 
-# GPUs compatible with CUDA 11.8 / PyTorch 2.1 (sm_50 to sm_90 only)
-# NO Blackwell (sm_120): RTX 5090, 5080, PRO 4500/6000, B200, B300
-GPU_PREFERENCE = [
-    "NVIDIA A40",                 # ~$0.44/hr — best value
-    "NVIDIA GeForce RTX 4090",    # ~$0.69/hr
-    "NVIDIA GeForce RTX 3090",    # ~$0.46/hr
-    "NVIDIA RTX A6000",           # ~$0.49/hr
-    "NVIDIA RTX A5000",           # ~$0.27/hr
-    "NVIDIA A100 80GB PCIe",      # ~$1.39/hr
-    "NVIDIA A100-SXM4-80GB",      # ~$1.49/hr
-]
-
-# Settings → "Cloud GPU" radio tiers map to ordered preference chains.
-# Each chain starts with the tier's primary GPU and degrades through
-# the next-best options on the same Pareto frontier so an unavailable
-# pick still gets something usable.
+# The four GPUs the Settings "Cloud GPU" picker exposes — and the ONLY
+# ones pod creation ever uses. All are CUDA 11.8 / PyTorch 2.1 capable
+# (sm_50–sm_90; no Blackwell: RTX 5090/5080, PRO 4500/6000, B200/B300).
+#
+# Each tier tries its own GPU first, then degrades through the other
+# three — nearest in speed first, cheaper on a tie — so an unavailable
+# pick still lands on a GPU the user could have picked from the list,
+# never an off-list one.
 TIER_CHAINS = {
-    "cheapest": [
+    "cheapest": [   # A40
         "NVIDIA A40",
-        "NVIDIA RTX A6000",
         "NVIDIA RTX 6000 Ada Generation",
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA H100 80GB HBM3",
     ],
-    "balanced": [
+    "balanced": [   # RTX 6000 Ada
         "NVIDIA RTX 6000 Ada Generation",
-        "NVIDIA A100 80GB PCIe",
-        "NVIDIA RTX A6000",
+        "NVIDIA A40",
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA H100 80GB HBM3",
+    ],
+    "fast": [       # A100 SXM
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA RTX 6000 Ada Generation",
+        "NVIDIA H100 80GB HBM3",
         "NVIDIA A40",
     ],
-    "fast": [
-        "NVIDIA A100-SXM4-80GB",
-        "NVIDIA A100 80GB PCIe",
-        "NVIDIA H100 80GB HBM3",
-        "NVIDIA RTX 6000 Ada Generation",
-    ],
-    "fastest": [
+    "fastest": [    # H100 SXM
         "NVIDIA H100 80GB HBM3",
         "NVIDIA A100-SXM4-80GB",
-        "NVIDIA A100 80GB PCIe",
         "NVIDIA RTX 6000 Ada Generation",
+        "NVIDIA A40",
     ],
 }
+
+# Errors from runpod.create_pod that mean "this GPU type can't host the
+# pod right now" — retry with the next GPU in the chain instead of
+# aborting the whole run. Anything else (auth, quota) still aborts.
+_GPU_RETRIABLE = (
+    "no longer any instances",
+    "no instances available",
+    "unavailable",
+    "does not have the resources",
+    "try a different machine",
+)
 
 
 class RunPodClient:
@@ -74,12 +78,10 @@ class RunPodClient:
         if ssh_public_key:
             env_vars["PUBLIC_KEY"] = ssh_public_key
 
-        # Build the chain: tier preference first, then fall through to the
-        # rest of GPU_PREFERENCE so an unavailable pick degrades silently.
+        # Only the user's tier GPUs are ever tried — the tier's primary
+        # first, then the other three from the picker as fallback. The
+        # chain never reaches off-list GPUs.
         chain = list(TIER_CHAINS.get(preferred_tier, TIER_CHAINS["cheapest"]))
-        for gpu in GPU_PREFERENCE:
-            if gpu not in chain:
-                chain.append(gpu)
         log(f"GPU tier: {preferred_tier} → trying {chain[0]} first")
 
         for gpu_type in chain:
@@ -100,12 +102,18 @@ class RunPodClient:
                 log(f"Got {gpu_type}!")
                 return pod
             except Exception as e:
-                if "no longer any instances" in str(e).lower() or "unavailable" in str(e).lower():
+                # A capacity error means "try a different machine" — move
+                # to the next GPU in the chain rather than failing the run.
+                if any(s in str(e).lower() for s in _GPU_RETRIABLE):
                     log(f"  {gpu_type} unavailable, trying next...")
                     continue
                 raise
 
-        raise RuntimeError("No GPUs available on RunPod right now. Try again in a few minutes.")
+        raise RuntimeError(
+            "Every GPU for the selected tier is unavailable on RunPod "
+            "right now. Try again in a few minutes, or pick a different "
+            "tier in Settings."
+        )
 
     def get_pod(self, pod_id: str) -> dict | None:
         try:
