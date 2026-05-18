@@ -1778,19 +1778,25 @@ class _CreateModelPanel(QWidget):
         layout.setContentsMargins(30, 20, 30, 20)
         layout.setSpacing(12)
 
-        # Header row with back button
+        # Header row: back button (left), "Models" title (centred),
+        # isolating indicator + import/export icons (right). The left and
+        # right groups carry equal layout stretch so the title stays
+        # window-centred no matter how wide either side gets.
         header = QHBoxLayout()
+
+        _hdr_left = QHBoxLayout()
         back = QLabel("← Back")
         back.setStyleSheet("color: rgba(255, 255, 255, 60); font-size: 12px; background: transparent;")
         back.setCursor(Qt.CursorShape.PointingHandCursor)
         back.mousePressEvent = lambda e: self.back_clicked.emit()
-        header.addWidget(back)
-        header.addStretch()
+        _hdr_left.addWidget(back)
+        _hdr_left.addStretch()
 
         title = QLabel("Models")
         title.setStyleSheet("color: #ddd; font-size: 18px; font-weight: bold; background: transparent;")
-        header.addWidget(title)
-        header.addStretch()
+
+        _hdr_right = QHBoxLayout()
+        _hdr_right.addStretch()
         # Yellow "isolating" indicator — shown top-right only while a
         # vocal-isolation run is in progress (see _isolate_vocals).
         self._lbl_isolating = QLabel("isolating")
@@ -1799,7 +1805,7 @@ class _CreateModelPanel(QWidget):
             " background: transparent; padding: 0 6px;"
         )
         self._lbl_isolating.setVisible(False)
-        header.addWidget(self._lbl_isolating)
+        _hdr_right.addWidget(self._lbl_isolating)
         # Import + Export icon buttons (top-right)
         icon_style = (
             "QLabel { color: rgba(255,255,255,55); font-size: 18px; "
@@ -1811,13 +1817,17 @@ class _CreateModelPanel(QWidget):
         self._btn_import_model.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_import_model.setToolTip("Import a .svc / .pth model from your computer")
         self._btn_import_model.mousePressEvent = lambda e: self._import_model_file()
-        header.addWidget(self._btn_import_model)
+        _hdr_right.addWidget(self._btn_import_model)
         self._btn_export_model = QLabel("⤒")
         self._btn_export_model.setStyleSheet(icon_style)
         self._btn_export_model.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_export_model.setToolTip("Export the selected model as a .svc file")
         self._btn_export_model.mousePressEvent = lambda e: self._export_model_file()
-        header.addWidget(self._btn_export_model)
+        _hdr_right.addWidget(self._btn_export_model)
+
+        header.addLayout(_hdr_left, 1)
+        header.addWidget(title, 0, Qt.AlignmentFlag.AlignHCenter)
+        header.addLayout(_hdr_right, 1)
         layout.addLayout(header)
 
         subtitle = QLabel("Name your voice, add audio clips, and train on a cloud GPU")
