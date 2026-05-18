@@ -155,11 +155,12 @@ class SettingsPage(QWidget):
         api_block.addWidget(lbl_api_caption)
         layout.addLayout(api_block)
 
-        # SSH Key Path
+        # SSH Key Path — caption tucked under the input, matching the
+        # RunPod API field above.
         layout.addSpacing(16)
-        lbl_ssh = QLabel("SSH Private Key Path")
-        lbl_ssh.setStyleSheet("font-weight: bold;")
-        layout.addWidget(lbl_ssh)
+        ssh_block = QVBoxLayout()
+        ssh_block.setContentsMargins(0, 0, 0, 0)
+        ssh_block.setSpacing(4)
 
         ssh_row = QHBoxLayout()
         self.txt_ssh_key = QLineEdit()
@@ -178,25 +179,53 @@ class SettingsPage(QWidget):
         self.btn_copy_pub = QPushButton("Copy Public Key")
         self.btn_copy_pub.clicked.connect(self._copy_public_key)
         ssh_row.addWidget(self.btn_copy_pub)
-        layout.addLayout(ssh_row)
+        ssh_block.addLayout(ssh_row)
 
-        # Spotify API (optional)
+        lbl_ssh_caption = QLabel("ssh private key path")
+        lbl_ssh_caption.setStyleSheet(
+            "color: rgba(255,255,255,90); font-size: 10px; padding-left: 2px;"
+        )
+        ssh_block.addWidget(lbl_ssh_caption)
+        layout.addLayout(ssh_block)
+
+        # Spotify API (optional) — caption under the inputs, matching the
+        # RunPod API field. Drop assets/spotify_logo.png in to light up a
+        # logo header above; until then the field stands on its caption.
         layout.addSpacing(16)
-        lbl_spotify = QLabel("Spotify API (optional — for artist images)")
-        lbl_spotify.setStyleSheet("font-weight: bold;")
-        layout.addWidget(lbl_spotify)
+        _spotify_pix = QPixmap(os.path.join(APP_DIR, "assets", "spotify_logo.png"))
+        if not _spotify_pix.isNull():
+            lbl_spotify_logo = QLabel()
+            _ss = _spotify_pix.scaledToHeight(
+                44, Qt.TransformationMode.SmoothTransformation
+            )
+            _ss.setDevicePixelRatio(2.0)
+            lbl_spotify_logo.setPixmap(_ss)
+            layout.addWidget(lbl_spotify_logo)
+
+        spotify_block = QVBoxLayout()
+        spotify_block.setContentsMargins(0, 0, 0, 0)
+        spotify_block.setSpacing(4)
 
         spotify_row = QHBoxLayout()
         self.txt_spotify_id = QLineEdit()
-        self.txt_spotify_id.setPlaceholderText("Client ID")
+        self.txt_spotify_id.setPlaceholderText("Spotify Client ID")
         self.txt_spotify_id.setEchoMode(QLineEdit.EchoMode.Password)
         spotify_row.addWidget(self.txt_spotify_id, 1)
 
         self.txt_spotify_secret = QLineEdit()
-        self.txt_spotify_secret.setPlaceholderText("Client Secret")
+        self.txt_spotify_secret.setPlaceholderText("Spotify Client Secret")
         self.txt_spotify_secret.setEchoMode(QLineEdit.EchoMode.Password)
         spotify_row.addWidget(self.txt_spotify_secret, 1)
-        layout.addLayout(spotify_row)
+        spotify_block.addLayout(spotify_row)
+
+        lbl_spotify_caption = QLabel(
+            "spotify api — optional, for artist images"
+        )
+        lbl_spotify_caption.setStyleSheet(
+            "color: rgba(255,255,255,90); font-size: 10px; padding-left: 2px;"
+        )
+        spotify_block.addWidget(lbl_spotify_caption)
+        layout.addLayout(spotify_block)
 
         # ── Train locally ──────────────────────────────────────────────
         # Novelty option for users with very fast Macs (M5+) or NVIDIA
