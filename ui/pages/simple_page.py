@@ -5127,9 +5127,47 @@ class _CreateModelPanel(QWidget):
         dataset_dir = os.path.join(str(DATASETS_DIR), name)
         os.makedirs(dataset_dir, exist_ok=True)
 
+        # Hold silent clips out of training. The clip processor already
+        # keeps silent clips out of self._clips, but one can turn silent
+        # later (e.g. vocal isolation of an instrumental section), and
+        # the trainer preprocesses every file in dataset_dir. Re-check
+        # here so the trained set is always silence-free.
+        non_silent, silent_dropped = [], []
+        for clip in self._clips:
+            if _ClipProcessWorker._is_silent(clip):
+                silent_dropped.append(clip)
+            else:
+                non_silent.append(clip)
+        if not non_silent:
+            QMessageBox.warning(
+                self, "No Audio",
+                "Every clip is silent — there's nothing to train on.",
+            )
+            return
+        if silent_dropped:
+            dropped = set(silent_dropped)
+            for rec in self._processed_files:
+                for c in rec.get("clips", []):
+                    if c.get("path") in dropped:
+                        c["silent"] = True
+            self._clips = non_silent
+            self._refresh_file_list()
+
+        # The trainer preprocesses every file in dataset_dir, so prune
+        # anything the silence-free clip list no longer includes — a
+        # silent clip or a removed one — before staging.
+        keep = {os.path.basename(c) for c in non_silent}
+        for f in os.listdir(dataset_dir):
+            if (f.lower().endswith(('.wav', '.flac', '.mp3', '.ogg'))
+                    and f not in keep):
+                try:
+                    os.remove(os.path.join(dataset_dir, f))
+                except OSError:
+                    pass
+
         # Build the work list: only files that don't already exist in dataset_dir
         pending = []
-        for clip in self._clips:
+        for clip in non_silent:
             dest = os.path.join(dataset_dir, os.path.basename(clip))
             if not os.path.exists(dest):
                 pending.append((clip, dest))
@@ -5145,6 +5183,11 @@ class _CreateModelPanel(QWidget):
         self._btn_train.setText(btn_label)
         self._log.setVisible(True)
         self._log.clear_log()
+        if silent_dropped:
+            self._log.append_line(
+                f"Skipped {len(silent_dropped)} silent clip(s) — too quiet "
+                f"to train on."
+            )
         self._lbl_status.setText("Resuming training..." if resume else "Starting training pipeline...")
 
         voice_type = self._cmb_type.currentText().lower()
